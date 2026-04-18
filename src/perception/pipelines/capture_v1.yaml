@@ -1,105 +1,98 @@
-version: 1
+# DepthAI v3 pipeline spec — documentation only.
+#
+# DepthAI v3 (>= 3.5.0) does NOT load pipeline graphs from YAML at runtime.
+# The authoritative graph is the Python builder in
+# `src/perception/capture.py::_build_pipeline`. This file mirrors the shape
+# of that builder so reviewers can see the node topology at a glance without
+# reading Python.
+#
+# LENS note: LENS is the Luxonis **neural stereo depth** model — it is *not*
+# a property on StereoDepth. On RVC4 the equivalent runtime path is
+# `dai.node.NeuralAssistedStereo` / `NeuralDepth` (loaded via
+# DepthAI Model Zoo). We start on the classical `StereoDepth` with preset
+# ROBOTICS, which is deterministic + well-understood; swapping in the neural
+# path is a G1–G2 upgrade gated on a smoke-tested blob.
+#
+# YOLOE-26 note: YOLOE-26 is an *open-vocabulary* detector — the class list
+# is supplied at runtime (`--prompts`) and the blob embeds a CLIP-style text
+# encoder. It does NOT have a fixed 80-class head like stock COCO YOLO. When
+# a blob is provided to `capture.py --yolo-blob`, it is loaded into a plain
+# `DetectionNetwork` (no fixed `classes: 80` config). When no blob is given,
+# the class/track masks are emitted as zeros (background) — a valid bundle.
+
+version: 2
+platform: RVC4
+owner_module: src/perception/capture.py
 
 nodes:
   - id: cam_rgb
-    type: ColorCamera
-    properties:
-      resolution: 1080p
+    type: Camera
+    socket: CAM_A
+    output:
+      size: [1920, 1080]
+      type: BGR888i
       fps: 15
-      interleaved: false
-      colorOrder: BGR
 
   - id: cam_left
-    type: MonoCamera
-    properties:
-      resolution: 400p
-      boardSocket: LEFT
+    type: Camera
+    socket: CAM_B
+    output:
+      size: [640, 400]
+      type: GRAY8
       fps: 15
 
   - id: cam_right
-    type: MonoCamera
-    properties:
-      resolution: 400p
-      boardSocket: RIGHT
+    type: Camera
+    socket: CAM_C
+    output:
+      size: [640, 400]
+      type: GRAY8
       fps: 15
 
   - id: stereo
     type: StereoDepth
-    properties:
-      depthAlign: cam_rgb
-      enableLENS: true
-      confidenceThreshold: 230
-      rectifyEdgeFillColor: 0
-
-  - id: yoloe
-    type: YoloDetectionNetwork
-    properties:
-      blobPath: "models/yoloe_26_open_vocab.blob"
-      confidenceThreshold: 0.5
-      classes: 80
-      coordinates: 4
-      anchors: []
-      anchorMasks: {}
-      iouThreshold: 0.5
-
-  - id: tracker
-    type: ObjectTracker
-    properties:
-      trackerType: ZERO_TERM_COLOR_HISTOGRAM
-      trackerIdAssignmentPolicy: UNIQUE_ID
-
-  - id: slc
-    type: SpatialLocationCalculator
-    properties:
-      waitForConfigInput: false
+    preset: ROBOTICS
+    depth_align_to: CAM_A
+    output_size: [1920, 1080]
+    left_right_check: true
+    subpixel: true
+    extended_disparity: false
+    outputs:
+      - depth          # 16-bit uint mm, host queue "depth"
+      - confidenceMap  # 8-bit uint 0..255, host queue "conf"
 
   - id: imu
     type: IMU
-    properties:
-      enableSensors: 
-        - ACCELEROMETER_RAW
-        - GYROSCOPE_RAW
-      sensorRate: 400
+    sensors:
+      - ACCELEROMETER_RAW @ 400 Hz
+      - GYROSCOPE_RAW     @ 400 Hz
+    batch_report_threshold: 1
+    max_batch_reports: 10
 
-  # Outputs
-  - id: out_rgb
-    type: XLinkOut
-    properties:
-      streamName: "rgb"
-  - id: out_depth
-    type: XLinkOut
-    properties:
-      streamName: "depth"
-  - id: out_track
-    type: XLinkOut
-    properties:
-      streamName: "track"
-  - id: out_imu
-    type: XLinkOut
-    properties:
-      streamName: "imu"
+  # Optional — only instantiated when --yolo-blob is supplied.
+  - id: yoloe
+    type: DetectionNetwork
+    blob: "<set via capture.py --yolo-blob>"
+    confidence_threshold: 0.4
+    open_vocab_prompts: "<set via capture.py --prompts>"
 
 connections:
-  - source: cam_rgb.video
-    target: yoloe.input
-  - source: cam_rgb.video
-    target: out_rgb.input
-  
-  - source: cam_left.out
-    target: stereo.left
-  - source: cam_right.out
-    target: stereo.right
-  - source: stereo.depth
-    target: slc.inputDepth
-  - source: stereo.depth
-    target: out_depth.input
-  
-  - source: yoloe.out
-    target: tracker.inputDetections
-  - source: cam_rgb.video
-    target: tracker.inputTrackerFrame
-  - source: tracker.out
-    target: out_track.input
+  - cam_left.out  -> stereo.left
+  - cam_right.out -> stereo.right
+  - cam_rgb.out   -> yoloe.input   # only when yoloe is present
 
-  - source: imu.out
-    target: out_imu.input
+host_output_queues:
+  - name: rgb      bound_to: cam_rgb.output
+  - name: depth    bound_to: stereo.depth
+  - name: conf     bound_to: stereo.confidenceMap
+  - name: imu      bound_to: imu.out
+  - name: det      bound_to: yoloe.out   # only when yoloe is present
+
+bundle_mapping:
+  rgb          -> frames/XXXXX.rgb.jpg        # JPEG q=90
+  depth        -> frames/XXXXX.depth.png      # 16-bit PNG, mm
+  conf         -> frames/XXXXX.conf.png       # 8-bit PNG
+  mask_class   -> frames/XXXXX.mask_class.png # 8-bit PNG  (zeros when yoloe disabled)
+  mask_track   -> frames/XXXXX.mask_track.png # 16-bit PNG (zeros when yoloe disabled)
+  imu          -> frames/XXXXX.imu.jsonl      # ~26 samples per frame at 15 fps, 400 Hz
+  objects      -> frames/XXXXX.objects.json   # empty list when yoloe disabled

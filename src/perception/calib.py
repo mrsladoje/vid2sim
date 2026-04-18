@@ -4,9 +4,9 @@ import logging
 from pathlib import Path
 
 try:
-    import depthai as dai # type: ignore
+    import depthai as dai  # type: ignore[import-not-found]
 except ImportError:
-    dai = None
+    dai = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 

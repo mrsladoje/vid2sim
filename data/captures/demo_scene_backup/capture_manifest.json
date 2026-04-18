@@ -1,0 +1,14 @@
+{
+  "session_id": "demo_scene_backup",
+  "device_serial": "3263741241",
+  "firmware_version": "unknown",
+  "capture_fps": 15,
+  "frame_count": 107,
+  "class_prompts": [
+    "chair",
+    "table",
+    "cup",
+    "bottle"
+  ],
+  "timebase_ns": 1776537067720906000
+}

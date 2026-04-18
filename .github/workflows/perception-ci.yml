@@ -2,35 +2,44 @@ name: Perception CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
       - 'src/perception/**'
       - 'tests/perception/**'
+      - 'scripts/generate_perception_stub.py'
+      - 'spec/perception_frame.md'
+      - '.github/workflows/perception-ci.yml'
   pull_request:
-    branches: [ main ]
+    branches: [main]
     paths:
       - 'src/perception/**'
       - 'tests/perception/**'
+      - 'scripts/generate_perception_stub.py'
+      - 'spec/perception_frame.md'
+      - '.github/workflows/perception-ci.yml'
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install pytest pytest-cov mypy ruff
-    - name: Lint with ruff
-      run: |
-        ruff check src/perception tests/perception
-    - name: Static type check with mypy
-      run: |
-        mypy src/perception
-    - name: Test with pytest
-      run: |
-        pytest tests/perception --cov=src/perception
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # depthai is NOT installed in CI — bundle.py, replay.py, tests, and
+          # the stub generator all import-guard it. Capture.py is exercised
+          # only on hardware.
+          python -m pip install pytest pytest-cov mypy ruff numpy pillow opencv-python-headless
+      - name: Lint
+        run: ruff check src/perception tests/perception scripts/generate_perception_stub.py
+      - name: Type-check
+        run: mypy --ignore-missing-imports src/perception
+      - name: Unit tests + coverage gate (bundle + replay ≥ 80 %)
+        run: |
+          pytest tests/perception \
+            --cov=src.perception.bundle --cov=src.perception.replay \
+            --cov-report=term-missing --cov-fail-under=80 -q

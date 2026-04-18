@@ -1,0 +1,11 @@
+{
+  "session_id": "hero_01",
+  "device_serial": "3263741241",
+  "firmware_version": "unknown",
+  "capture_fps": 15,
+  "frame_count": 107,
+  "class_prompts": [
+    "chair"
+  ],
+  "timebase_ns": 1776537021849293900
+}

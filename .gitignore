@@ -34,3 +34,7 @@ data/scenes/
 CLAUDE.md
 ruvector.db
 
+# Capture scratch space — named captures under data/captures/ are committed
+# artifacts per docs/plans/01-perception.md, but scratch runs should not be.
+data/captures/latest/
+data/captures/_tmp_*/

@@ -1,6 +1,6 @@
 # ADR-008: Scope exclusions (no Gaussian splats, no Isaac, no Genesis, no critical-path video diffusion)
 
-- **Status:** Accepted
+- **Status:** Accepted — **narrowed by ADR-009** (cloud GPU is now admitted for Stage B diffusion on a pre-warmed persistent pod; all other cloud exclusions still stand).
 - **Date:** 2026-04-18
 - **Deciders:** VID2SIM core team
 - **Area:** Scope / risk management
@@ -51,4 +51,4 @@ Each excluded item was a real candidate; this section records why each one is ou
 - PRD §3.2 (Non-goals)
 - PRD §10 (Target simulator formats)
 - PRD §13 (Risks)
-- Related: ADR-003 (chose mesh diffusion over splats), ADR-004 (chose Rapier + MuJoCo over Isaac / Genesis / pure-PyBullet runtime), ADR-007 (no cloud compute either).
+- Related: ADR-003 (chose mesh diffusion over splats), ADR-004 (chose Rapier + MuJoCo over Isaac / Genesis / pure-PyBullet runtime), ADR-007 (compute split), **ADR-009 (narrows the cloud-exclusion to admit a persistent RunPod pod for Stage B diffusion only)**.

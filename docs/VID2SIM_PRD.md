@@ -66,7 +66,8 @@ Primary demo user: hackathon judges clicking inside a browser.
 
 - The pipeline is designed against the **OAK-4 D** or **OAK-4 D Pro**. D Pro is preferred for its IR dot projector (resolves low-texture surfaces). Per Luxonis, OAK-4 D Pro NFOV depth error is <1.5% below 4 m, <3% at 4–8 m; ideal range 0.7–12 m; baseline 7.5 cm.
 - The **OAK-4 S** ships with a stereo pair as well (per Luxonis shop page), but its IR projector and baseline are optimised for a different form factor; the pipeline was specced against the D Pro and has not been re-benchmarked on the S. Treat S as "probably works, unverified" and keep D Pro as the target.
-- Local compute assumed: MacBook Pro M3 Max, 40-core GPU, 128 GB unified memory. No CUDA. No Isaac Sim.
+- Local compute assumed: MacBook Pro M3 Max, 40-core GPU, 128 GB unified memory. No local CUDA. No Isaac Sim.
+- **Remote compute (ADR-009):** RunPod persistent pod (A100 40GB baseline, H100 preferred) for Stage B image-to-3D only. Pod is pre-warmed before the pitch; all other stages remain local.
 
 ---
 
@@ -81,17 +82,22 @@ Primary demo user: hackathon judges clicking inside a browser.
    └──────────────────┬──────────────────┘
                       │ USB-C / PoE
                       ▼
-   ┌──────── M3 Max (offline) ──────────┐
-   │ A. Geometry recovery               │
-   │ B. Geometry completion (diffusion) │
-   │ C. Physics inference (VLM)         │
+   ┌──────── M3 Max (offline, local) ───┐
+   │ A. Geometry recovery (DA3 + VIO)   │
+   │ B'. ICP align + decimate           │
+   │ C. Physics inference (VLM → cloud) │
    │ D. Scene assembly + exporters       │
    │ E. Optional pretty-pass video diff │
-   └──────────────────┬──────────────────┘
-                      ▼
-   ┌──────── Browser (Three.js) ────────┐
-   │ Rapier WASM physics · 60 FPS       │
-   └─────────────────────────────────────┘
+   │ (SF3D last-resort local fallback)  │
+   └─────┬────────────────────────┬──────┘
+         │ HTTPS (crop → glb)     │
+         ▼                        ▼
+   ┌─ RunPod (A100/H100) ─┐   ┌─ Browser (Three.js) ─┐
+   │ B. Image→3D diffusion│   │ Rapier WASM · 60 FPS │
+   │ Hunyuan3D 2.1 +       │   └───────────────────────┘
+   │ TripoSG 1.5B in-pod   │
+   │ fallback (ADR-009)    │
+   └───────────────────────┘
 ```
 
 The only contract between stages is the **`scene.json` spec** (see §9). All stages are independently testable.
@@ -118,8 +124,8 @@ The only contract between stages is the **`scene.json` spec** (see §9). All sta
 | Concern | Decision |
 |---|---|
 | Primary model | Hunyuan3D 2.1 (Tencent) — DiT shape + Paint 2.1 PBR textures |
-| Fallback model | TripoSG 1.5B (VAST-AI, Jan 2026, MIT) — rectified-flow, MPS-compatible, better quality than SF3D at similar throughput; Stable Fast 3D kept as emergency-only fallback if TripoSG fails on MPS |
-| Execution | Local on M3 Max via MPS using the `Brainkeys/Hunyuan3D-2.1-mac` community fork (flash-attn → SDPA, removes CUDA deps, PyTorch 2.5.1) |
+| Fallback model | TripoSG 1.5B (VAST-AI, Jan 2026, MIT) — rectified-flow; runs in-pod alongside Hunyuan3D. Stable Fast 3D kept as **local MPS last-resort** if RunPod is unreachable (ADR-009) |
+| Execution | **RunPod persistent pod (A100 40GB baseline, H100 if available), pre-warmed T-60 min before demo (ADR-009)**. FastAPI endpoint `POST /mesh {rgb_crop, mask, model} → glb_bytes`. Local M3 Max handles only ICP align + decimate; no diffusion runs locally unless fallback fires. Stock CUDA Hunyuan3D build — no MPS fork. |
 | Input | RGB crop + mask of each segmented object |
 | Output | Watertight mesh in unit cube, UV-mapped, PBR maps |
 | Scale recovery | ICP-style alignment of generated mesh to observed point cloud (s, R, t) |
@@ -249,7 +255,7 @@ Schema file ships as `spec/scene.schema.json` (JSON Schema draft 2020-12). Every
 | On-device models | LENS, YOLOE-26, ObjectTracker, SpatialLocationCalc | First-class on Luxonis RVC4 |
 | Host SLAM | RTAB-Map (via DepthAI v3 nodes) | Bundled integration |
 | Monocular depth | Depth Anything 3 `DA3METRIC-LARGE` | Metric-native; fuses with stereo |
-| Image→3D | Hunyuan3D 2.1 via `Brainkeys/Hunyuan3D-2.1-mac` fork (hero) + TripoSG 1.5B (fallback) + SF3D (emergency) | Watertight PBR; MPS-compatible |
+| Image→3D | Hunyuan3D 2.1 **on RunPod A100/H100 persistent pod (ADR-009)** + TripoSG 1.5B in-pod fallback + local SF3D emergency fallback on M3 Max MPS | Watertight PBR; stable wall-time for 2-min live demo; local fallback covers network outage |
 | Physics LLM | Claude Opus 4.7 (primary), Gemini 3.1 Pro (backup), Qwen3-VL-30B-A3B-Instruct (cheap-path) — all wrapped with PhysQuantAgent-style visual prompting | Structured JSON output |
 | Physics engine | Rapier (browser) + MuJoCo (export, v3.3.2+) | No-backend demo + headless option |
 | Viewer | Three.js + Rapier WASM | 60 FPS, zero backend |
@@ -295,15 +301,16 @@ Hard rule: **no new features after H18**. Integration-only from then on.
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | OAK-4 S is the only camera available and its stereo pipeline behaves differently from D Pro | Medium | Re-benchmark at H0; if degraded, fall back to DA3-monocular only; pitch weakens but demo still works |
-| Hunyuan3D 2.1 won't run cleanly on MPS in time | Medium | Swap in TripoSG 1.5B (rectified-flow, MPS-compatible, better than SF3D at similar throughput); SF3D is emergency-only if TripoSG also fails |
+| RunPod pod unreachable from venue (network block, auth, region outage) | Medium | Pod pre-warmed T-60 min; tether via phone; local SF3D on M3 Max MPS as last-resort fallback; stub primitive emitter as break-glass so Person 3 is never blocked (ADR-009) |
+| Hunyuan3D 2.1 / TripoSG in-pod fails on a given crop | Low | Retry once, then in-pod swap to the other model via `model` arg; cap per-object wall time to 25 s; emit stub if both fail |
 | LENS stereo noisy on thin objects | Low | DA3 takes over per-object where mask is thin |
 | RTAB-Map VIO (early-access host node) fails to converge on short captures | Medium | Fall back to single-keyframe mode; on-device ObjectTracker gives coarse pose |
 | ICP mesh alignment drifts on symmetric or untextured objects | Medium | Seed with 2D BBox centroid + YOLO class prior; limit search to azimuth; cap iterations |
-| M3 Max thermal throttling during back-to-back Hunyuan3D runs | Medium | Run Stage B serially with cooldown gaps; monitor `powermetrics`; fall back to TripoSG 1.5B (SF3D emergency) if sustained throttle |
+| M3 Max thermal throttling during back-to-back diffusion | Superseded by ADR-009 | Stage B now runs on RunPod, not M3 Max. Local SF3D fallback uses ≤1 pass at a time with cooldowns; risk only materialises if both RunPod paths fail. |
 | Browser WASM memory ceiling on scenes with many large meshes | Low | Cap at 8 objects per scene (matches NFR); decimate Hunyuan3D output if >50k tris/object |
 | Pretty-mode video diffusion takes too long | High | Pre-render the one demo clip overnight; keep off critical path |
 | Demo laptop crashes mid-pitch | Low | Record a 30 s demo video as backup; play if needed |
-| Captive venue network blocks VLM API | Medium | Tether via phone; fall back to class-label lookup table (ADR-005) |
+| Captive venue network blocks VLM API **or RunPod pod** | Medium→High (now on critical path for Stage B) | Tether via phone before pitch; fall back to class-label lookup (ADR-005) for VLM; fall back to local SF3D on M3 Max for Stage B (ADR-009); run a pre-pitch end-to-end from the venue network as a final gate |
 
 ---
 
@@ -334,12 +341,14 @@ Hard rule: **no new features after H18**. Integration-only from then on.
 4. **Demo scene selection** — pick one reproducible room ahead of time (the venue table?) and rehearse the capture.
 5. **Pretty-mode depth source** — use Rapier's depth buffer or re-render via MuJoCo? Decide at H16.
 6. **Dynamic triangle-mesh colliders in Rapier** — Rapier supports trimesh colliders but they are primarily intended as *static* colliders; for dynamic rigid bodies we need convex decomposition. Confirm CoACD 1.0.10 tolerance per object class at H10.
-7. **Hunyuan3D per-object wall time on MPS** — fork README claims feasibility but no hard number published; bench one asset at H0–H2 and set a per-object budget before committing to the 90 s scene target.
+7. **Hunyuan3D per-object wall time on RunPod A100/H100** — expected ~5–15 s but needs confirmation with our exact crop size and network path. Bench at H0–H2 (ADR-009). Original M3 Max MPS question is retired — Stage B no longer runs locally unless the pod is down.
 8. **KHR_physics_rigid_bodies** is still a draft glTF extension. We ship a sidecar physics JSON alongside the `.glb` to avoid depending on a non-ratified extension; revisit if the spec lands mid-hackathon.
 9. **LTX-2-19B + IC-LoRA-Depth-Control per-frame latency on M3 Max MPS** — no public number; bench at H0–H2. Blocking for Stage E budget.
 10. **Qwen3-VL-30B-A3B JSON-mode accuracy vs Claude Opus 4.7** — run 50-object physics-property test set at H0–H2 before committing to Opus as primary. Blocking.
 11. **EfficientSAM3 Q1 2026 weights availability and accuracy on our target class list** — confirm release + bench at H0–H2. Blocking for edge-SAM path.
-12. **TripoSG 1.5B per-asset wall time and mesh watertightness on M3 Max** — bench at H0–H2. Blocking for fallback commitment.
+12. **TripoSG 1.5B per-asset wall time and mesh watertightness on RunPod** — bench at H0–H2 alongside Hunyuan3D (both models stay in the same pod image). Also bench local SF3D one-shot on M3 Max MPS as last-resort fallback.
+14. **RunPod pod region + venue-network round-trip latency** — bench at H0–H2 from a proxy network if the venue is inaccessible pre-event. Blocking for ADR-009 commit.
+15. **Mesh wire format from RunPod → laptop** — raw `.glb` vs gzipped `.glb` vs presigned S3 URL for large meshes. Decide at H2.
 13. **DA3 RVC4 port status** — still no public `.dlc` as of April 2026; run off-device on M3 Max. Revisit if Luxonis ships a port.
 
 ---

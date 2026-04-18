@@ -4,7 +4,7 @@
 
 ## Project summary
 
-VID2SIM turns a 5–15 s RGB-D capture from an **OAK-4 D Pro** into a **browser-playable, physics-ready 3D scene** in under 90 s of offline compute on an M3 Max. The pipeline is: on-device perception (LENS + YOLOE-26 + IMU) → host fusion (stereo + DA3METRIC-LARGE) + VIO → per-object completion (Hunyuan3D 2.1 / TripoSG 1.5B fallback) + VLM physics properties (Claude Opus 4.7 primary, Gemini 3.1 Pro / Qwen3-VL-30B-A3B alternates, all with PhysQuantAgent-style visual prompting) → the single published contract `scene.json` → exporters (glTF+sidecar / MJCF / MuJoCo `.py` / USD) → a static Three.js + Rapier WASM viewer. The 24-hour build is split across **4 bounded contexts** with **1 hard schema freeze at H2** and **5 global phase gates**.
+VID2SIM turns a 5–15 s RGB-D capture from an **OAK-4 D Pro** into a **browser-playable, physics-ready 3D scene** in under 90 s of offline compute. The pipeline is: on-device perception (LENS + YOLOE-26 + IMU) → host fusion on M3 Max (stereo + DA3METRIC-LARGE) + VIO → **image-to-3D completion on a RunPod persistent GPU pod (Hunyuan3D 2.1 primary, TripoSG 1.5B in-pod fallback; SF3D on local MPS as last-resort; see ADR-009)** + VLM physics properties (Claude Opus 4.7 primary, Gemini 3.1 Pro / Qwen3-VL-30B-A3B alternates, all with PhysQuantAgent-style visual prompting) → the single published contract `scene.json` → exporters (glTF+sidecar / MJCF / MuJoCo `.py` / USD) → a static Three.js + Rapier WASM viewer. The 24-hour build is split across **4 bounded contexts** with **1 hard schema freeze at H2** and **5 global phase gates**.
 
 ## Bounded-context diagram
 
@@ -14,7 +14,7 @@ flowchart LR
     P1A[OAK-4 D Pro · LENS · YOLOE-26 · IMU]
   end
   subgraph P2["Person 2 · Reconstruction"]
-    P2A[DA3 + RANSAC fusion · RTAB-Map VIO · Hunyuan3D/TripoSG/SF3D · ICP align]
+    P2A[DA3 + RANSAC fusion · RTAB-Map VIO · RunPod Hunyuan3D/TripoSG (SF3D local fallback) · ICP align]
   end
   subgraph P3["Person 3 · Scene Assembly (schema owner)"]
     P3A[VLM physics (PhysQuantAgent prompting) · CoACD · Assembler · Exporters]
@@ -61,7 +61,7 @@ The three published contracts — **PerceptionFrame**, **ReconstructedObject**, 
 
 | Window | G | Perception (P1) | Reconstruction (P2) | Scene (P3) | Presentation (P4) |
 |---|---|---|---|---|---|
-| H0–H2 | **G0** | Hardware alive; PerceptionFrame format drafted | DA3 + Hunyuan3D bench logged; RecObj contract drafted | **scene.schema.json v1.0 FROZEN**; example fixture published | Viewer boot; renders example fixture with physics |
+| H0–H2 | **G0** | Hardware alive; PerceptionFrame format drafted | DA3 bench + **RunPod pod warm + round-trip bench (ADR-009)**; RecObj contract drafted | **scene.schema.json v1.0 FROZEN**; example fixture published | Viewer boot; renders example fixture with physics |
 | H2–H6 | **G1** | Stub capture bundle on disk; pipeline YAML v1 | Fusion + backproject + stub RecObj emitter | Assembler v0 on stubs; glTF+sidecar + MJCF exporters | All 4 interaction modes; stub scene loads |
 | H6–H12 | **G2** | Hero object capture (`hero_01`) | Hero RecObj end-to-end: fused depth → Hunyuan3D → ICP → mesh.glb | VLM + CoACD + ground plane; hero scene.json + exports | Hero scene interactive; deck draft; pretty bench |
 | H12–H18 | **G3** | Demo scene + backup bundles; replay mode | Full demo scene RecObjs; thermal watchdog | Full demo `scene.json` + 3–4 exporters | Full demo scene at 60 FPS; choreography rehearsed; backup video |
@@ -99,7 +99,7 @@ Every stream must meet its row of each gate before the team advances. Gates are 
 
 - **Blocks all stream-specific work until green.**
 - **P1**: camera enumerates; PerceptionFrame format draft; confirm S vs D Pro.
-- **P2**: DA3, Hunyuan3D, and TripoSG bench numbers logged; RecObj contract drafted; MPS env stable.
+- **P2**: DA3 local bench logged; **RunPod pod spun up, Hunyuan3D + TripoSG warm in-pod, laptop→pod round-trip <300 ms on tether; one-shot mesh returned end-to-end (ADR-009)**; local SF3D fallback boots on MPS; RecObj contract drafted.
 - **P3**: **`spec/scene.schema.json` v1.0 is frozen**, `scene.example.json` validates, signoff from P1/P2/P4.
 - **P4**: viewer skeleton builds; renders `scene.example.json` with Three.js + Rapier in-browser.
 - **Global**: CI green on empty skeletons; repo scaffolding (src/, tests/, spec/, data/, docs/, web/) merged.
@@ -118,7 +118,7 @@ Every stream must meet its row of each gate before the team advances. Gates are 
 - **P2**: `data/reconstructed/hero_01/` has a correctly-scaled, world-posed, watertight mesh with full provenance.
 - **P3**: `data/scenes/hero_01/` emitted; VLM (with PhysQuantAgent visual prompting) + lookup both wired; CoACD 1.0.10 active.
 - **P4**: hero scene loads in viewer; deck draft exists; pretty-mode bench number logged.
-- **Global**: Hunyuan3D MPS budget decision locked (H10): primary = Hunyuan3D or primary = TripoSG 1.5B (SF3D emergency only).
+- **Global**: RunPod-hosted Hunyuan3D confirmed as primary at H10 (per-object wall time ≤20 s end-to-end including network); TripoSG in-pod swap is one config flag; local SF3D verified as last-resort fallback.
 
 ### G3 — H18 · Full demo scene; FEATURE FREEZE
 
@@ -139,7 +139,7 @@ Every stream must meet its row of each gate before the team advances. Gates are 
 ### G5 — H24 · Demo-ready
 
 - **P1**: camera hot, replay bundle warm.
-- **P2**: reconstruction cached, models pre-warmed.
+- **P2**: reconstruction cached; **RunPod pod pre-warmed T-60 min with weights on persistent volume; `GET /healthz` green at T-10 min; tether + local SF3D fallback ready**.
 - **P3**: demo scene staged; backup scene ready.
 - **P4**: pitch deck final, backup demo video primed, kill-switch tested.
 - **Global**: one final full dress rehearsal done; fallback video proven playable.

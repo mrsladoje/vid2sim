@@ -13,7 +13,8 @@ This directory holds the Architecture Decision Records (ADRs) for the VID2SIM ha
 | 005 | [VLM-inferred physics properties with lookup fallback](ADR-005-vlm-physics-inference.md) | Accepted | 2026-04-18 | Physics inference (Stage C)   |
 | 006 | [Browser-native viewer, no backend](ADR-006-browser-native-viewer.md)              | Accepted | 2026-04-18 | Demo delivery                 |
 | 007 | [Compute split — edge NPU for perception, M3 Max for offline](ADR-007-compute-split.md) | Accepted | 2026-04-18 | Compute placement             |
-| 008 | [Scope exclusions (no splats, Isaac, Genesis, video diffusion)](ADR-008-scope-exclusions.md) | Accepted | 2026-04-18 | Scope / risk                  |
+| 008 | [Scope exclusions (no splats, Isaac, Genesis, video diffusion)](ADR-008-scope-exclusions.md) | Accepted (narrowed by 009) | 2026-04-18 | Scope / risk                  |
+| 009 | [RunPod remote GPU for Stage B image-to-3D](ADR-009-runpod-remote-diffusion.md)              | Accepted | 2026-04-18 | Compute placement / Stage B   |
 
 ## Relationships
 
@@ -27,6 +28,7 @@ flowchart TD
     ADR004[ADR-004<br/>Dual physics engines<br/>Rapier + MuJoCo]
     ADR006[ADR-006<br/>Browser-native viewer<br/>Three.js + Rapier WASM]
     ADR008[ADR-008<br/>Scope exclusions<br/>no splats/Isaac/Genesis]
+    ADR009[ADR-009<br/>RunPod remote GPU<br/>Stage B diffusion]
 
     ADR007 --> ADR002
     ADR007 --> ADR003
@@ -41,6 +43,9 @@ flowchart TD
     ADR008 -.excludes alternatives to.-> ADR003
     ADR008 -.excludes alternatives to.-> ADR004
     ADR008 -.excludes alternatives to.-> ADR007
+    ADR009 -.supersedes compute placement of.-> ADR003
+    ADR009 -.updates.-> ADR007
+    ADR009 -.narrows.-> ADR008
 ```
 
 Reading it left-to-right: the compute split (007) enables both the hybrid perception stack (002) and the offline diffusion + VLM stages (003, 005). Those stages feed the `scene.json` source of truth (001), which fans out to the dual physics engines (004) and the browser viewer (006). ADR-008 is the scope fence that rules out the main alternatives considered in 003, 004, and 007.

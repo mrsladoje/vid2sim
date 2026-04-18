@@ -74,10 +74,43 @@ class _Hunyuan3DHandle:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("paint pipeline failed at runtime (%s); "
                                "returning untextured shape mesh", exc)
+        else:
+            # Paint not loaded (usually because bpy won't import) —
+            # bake a cheap image-projection vertex colour so the glb is
+            # not flat grey. Runs in ~0.1 s, numpy only.
+            _apply_projection_colors(mesh, rgba)
 
         buf = io.BytesIO()
         mesh.export(buf, file_type="glb")
         return buf.getvalue()
+
+
+def _apply_projection_colors(mesh, rgba_image) -> None:
+    """Fast per-vertex coloring by planar XY projection of the input
+    image. Back-facing vertices are darkened so the rear of the mesh
+    does not mirror the front photo."""
+    import numpy as np
+    import trimesh
+
+    img = np.asarray(rgba_image.convert("RGB"), dtype=np.uint8)
+    h, w = img.shape[:2]
+    v = np.asarray(mesh.vertices, dtype=np.float32)
+    if v.size == 0:
+        return
+    u = (v[:, 0] - v[:, 0].min()) / (v[:, 0].max() - v[:, 0].min() + 1e-9)
+    y = (v[:, 1] - v[:, 1].min()) / (v[:, 1].max() - v[:, 1].min() + 1e-9)
+    px = np.clip((u * (w - 1)).astype(np.int32), 0, w - 1)
+    py = np.clip(((1.0 - y) * (h - 1)).astype(np.int32), 0, h - 1)
+    colors = img[py, px].copy()
+    try:
+        back = np.asarray(mesh.vertex_normals, dtype=np.float32)[:, 2] < 0.0
+        colors[back] = (colors[back] * 0.35).astype(np.uint8)
+    except Exception:  # noqa: BLE001
+        pass
+    rgba = np.concatenate(
+        [colors, np.full((colors.shape[0], 1), 255, dtype=np.uint8)], axis=1,
+    )
+    mesh.visual = trimesh.visual.ColorVisuals(mesh=mesh, vertex_colors=rgba)
 
 
 def load(weights_dir: Path) -> _Hunyuan3DHandle:

@@ -58,19 +58,49 @@ def load(weights_dir: Path) -> _Hunyuan3DHandle:
     cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(weights_dir / "hf"))
 
-    # The reference repo ships its own pipeline wrappers; try both the
-    # official module names (the codebase reshuffled once).
-    try:
-        from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline  # type: ignore
-    except ImportError:  # pragma: no cover
-        from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline  # type: ignore
-
-    try:
-        from hy3dpaint.textureGenPipeline import (  # type: ignore
-            Hunyuan3DPaintPipeline,
+    # Import paths for Hunyuan3D 2.1. We try a few known paths and, on
+    # failure, re-raise with ALL errors concatenated so the real
+    # missing dep is visible in the log (instead of being hidden
+    # behind a misleading second ImportError).
+    shape_errors: list[str] = []
+    Hunyuan3DDiTFlowMatchingPipeline = None
+    for mod_path, cls_name in (
+        ("hy3dshape.pipelines", "Hunyuan3DDiTFlowMatchingPipeline"),
+        ("hy3dshape",           "Hunyuan3DDiTFlowMatchingPipeline"),
+        ("hy3dgen.shapegen",    "Hunyuan3DDiTFlowMatchingPipeline"),  # 2.0 legacy
+    ):
+        try:
+            mod = __import__(mod_path, fromlist=[cls_name])
+            Hunyuan3DDiTFlowMatchingPipeline = getattr(mod, cls_name)
+            logger.info("hy3dshape pipeline found at %s", mod_path)
+            break
+        except Exception as exc:  # noqa: BLE001
+            shape_errors.append(f"{mod_path}: {type(exc).__name__}: {exc}")
+    if Hunyuan3DDiTFlowMatchingPipeline is None:
+        raise ImportError(
+            "could not import Hunyuan3DDiTFlowMatchingPipeline; tried:\n  "
+            + "\n  ".join(shape_errors)
         )
-    except ImportError:  # pragma: no cover
-        from hy3dgen.texgen import Hunyuan3DPaintPipeline  # type: ignore
+
+    paint_errors: list[str] = []
+    Hunyuan3DPaintPipeline = None
+    for mod_path, cls_name in (
+        ("hy3dpaint.textureGenPipeline", "Hunyuan3DPaintPipeline"),
+        ("hy3dpaint",                    "Hunyuan3DPaintPipeline"),
+        ("hy3dgen.texgen",               "Hunyuan3DPaintPipeline"),  # 2.0 legacy
+    ):
+        try:
+            mod = __import__(mod_path, fromlist=[cls_name])
+            Hunyuan3DPaintPipeline = getattr(mod, cls_name)
+            logger.info("hy3dpaint pipeline found at %s", mod_path)
+            break
+        except Exception as exc:  # noqa: BLE001
+            paint_errors.append(f"{mod_path}: {type(exc).__name__}: {exc}")
+    if Hunyuan3DPaintPipeline is None:
+        raise ImportError(
+            "could not import Hunyuan3DPaintPipeline; tried:\n  "
+            + "\n  ".join(paint_errors)
+        )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32

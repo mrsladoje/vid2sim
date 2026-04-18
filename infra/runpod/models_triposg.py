@@ -51,12 +51,24 @@ def load(weights_dir: Path) -> _TripoSGHandle:
     os.environ.setdefault("HF_HOME", str(weights_dir / "hf"))
 
     # TripoSG ships either as a `diffusers`-style pipeline or a custom
-    # inference class. Try the official wrapper first; fall back to
-    # hand-rolled pipeline.
-    try:
-        from triposg.pipelines import TripoSGPipeline  # type: ignore
-    except ImportError:  # pragma: no cover
-        from triposg.pipeline import TripoSGPipeline  # type: ignore
+    # inference class. Try a few known module paths and surface ALL
+    # errors if none resolve, so the real missing dep is visible.
+    errors: list[str] = []
+    TripoSGPipeline = None
+    for mod_path in ("triposg.pipelines", "triposg.pipeline",
+                     "triposg", "triposg.inference"):
+        try:
+            mod = __import__(mod_path, fromlist=["TripoSGPipeline"])
+            TripoSGPipeline = getattr(mod, "TripoSGPipeline")
+            logger.info("triposg pipeline found at %s", mod_path)
+            break
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{mod_path}: {type(exc).__name__}: {exc}")
+    if TripoSGPipeline is None:
+        raise ImportError(
+            "could not import TripoSGPipeline; tried:\n  "
+            + "\n  ".join(errors)
+        )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32

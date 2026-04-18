@@ -1,0 +1,23 @@
+# Minimal deps for the RunPod pod server.
+# Kept deliberately tight — we want a small image that boots fast.
+# Pins are guidance; the pod `pip install -U` on first boot to pull
+# CUDA-matched torch wheels from the NVIDIA index.
+
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.6
+python-multipart>=0.0.9
+numpy>=1.26
+Pillow>=10.2
+trimesh>=4.4
+pygltflib>=1.16
+huggingface-hub>=0.24
+
+# Torch / CUDA pinned separately via pip extra-index-url at build time:
+#   --extra-index-url https://download.pytorch.org/whl/cu124
+torch>=2.4
+torchvision>=0.19
+
+# Hunyuan3D 2.1 + TripoSG 1.5B are installed from source in server.py
+# `ensure_models()` on first boot; they live on the persistent volume
+# mounted at /workspace/weights.

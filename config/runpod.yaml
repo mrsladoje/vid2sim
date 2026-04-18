@@ -1,0 +1,50 @@
+# RunPod configuration — ADR-009.
+#
+# The pod hosts Hunyuan3D 2.1 (primary) + TripoSG 1.5B (in-pod fallback)
+# behind a single FastAPI endpoint. Image-to-3D is the ONLY stage that
+# runs on the pod; everything else stays on M3 Max.
+#
+# Secrets (RUNPOD_API_KEY) are read from env vars; never commit them.
+
+endpoint:
+  # Override via env RUNPOD_ENDPOINT at runtime. The default is a
+  # placeholder that MUST be overwritten before a live demo.
+  url: "https://REPLACE_ME.proxy.runpod.net"
+  healthz_path: "/healthz"
+  mesh_path: "/mesh"
+
+pod:
+  preferred_region: "EU-RO-1"
+  gpu_baseline: "A100-40GB"
+  gpu_preferred: "H100"
+  persistent_volume_gb: 100
+  # Pre-warm ritual — see ADR-009 operational run-book.
+  prewarm_minutes_before_demo: 60
+  healthcheck_minutes_before_demo: 10
+
+client:
+  # Per-request budget. Exceeding this trips the SF3D local fallback.
+  request_timeout_s: 25.0
+  connect_timeout_s: 5.0
+  retries_per_call: 1
+  # Wire format. ADR-009 open-q: raw glb now; switch to presigned URL if
+  # payloads start exceeding a few MB.
+  wire_format: "raw_glb"
+  # Which in-pod model to call first.
+  primary_model: "hunyuan3d"       # "hunyuan3d" | "triposg"
+  fallback_model: "triposg"
+
+watchdog:
+  poll_interval_s: 5.0
+  # Number of consecutive failed healthchecks before circuit opens and
+  # client re-routes to local SF3D.
+  failure_threshold: 2
+  # Seconds after circuit opens before we probe the pod again.
+  recovery_probe_s: 30.0
+
+fallback:
+  # Local MPS SF3D is last resort. See src/reconstruction/sf3d_runner.py.
+  local_sf3d_enabled: true
+  # If both RunPod + SF3D fail, we emit a primitive stub mesh flagged in
+  # provenance.mesh_origin_detail = "stub".
+  stub_on_double_failure: true

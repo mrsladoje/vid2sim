@@ -26,3 +26,11 @@ data/scenes/
 .env
 .env.local
 *.secret
+
+# Local tooling (per-machine, not checked in)
+.claude/
+.claude-flow/
+.mcp.json
+CLAUDE.md
+ruvector.db
+

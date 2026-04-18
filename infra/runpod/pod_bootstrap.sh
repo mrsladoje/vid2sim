@@ -37,6 +37,17 @@ log "weights:    $WEIGHTS_DIR"
 log "venv:       $VENV_DIR"
 log "port:       $PORT"
 
+# -- 0c. Auto-load HF token from /workspace/.hf/token if present -------------
+# Some HF repos (e.g. stabilityai/stable-fast-3d) are gated — they need
+# auth headers on every request. Persist the user's read token under
+# /workspace and export it on boot so snapshot_download + the model
+# loaders authenticate transparently.
+if [ -f "$WORKSPACE/.hf/token" ]; then
+    HF_TOKEN_VAL="$(cat "$WORKSPACE/.hf/token")"
+    export HF_TOKEN="$HF_TOKEN_VAL"
+    export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN_VAL"
+fi
+
 # -- 0b. Persist library caches onto /workspace ------------------------------
 # Several model libraries (notably hy3dgen/hy3dshape) ignore cache_dir=
 # kwargs and write into /root/.cache/, which is ephemeral. Symlink them

@@ -98,9 +98,11 @@ log "step 2/6  system deps (apt)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-    git curl wget ca-certificates python3-venv \
+    git curl wget ca-certificates python3-venv tmux \
     libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 \
-    tmux >/dev/null
+    libxi6 libxxf86vm1 libxfixes3 libxkbcommon0 libx11-6 \
+    libxrandr2 libxinerama1 libxcursor1 libegl1 libgomp1 \
+    >/dev/null
 
 # -- 3. Persistent Python venv on /workspace ---------------------------------
 # First run: create venv + install everything (~4 min total, one-time).

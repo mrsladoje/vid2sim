@@ -130,7 +130,15 @@ fi
 
 # Make both source trees importable without needing setup.py by
 # prepending them to PYTHONPATH at server launch time (step 6).
-export POD_PYTHONPATH="$WEIGHTS_DIR/src/Hunyuan3D-2.1:$WEIGHTS_DIR/src/TripoSG"
+#
+# Hunyuan3D-2.1 uses a nested layout (outer hy3dshape/ is a project
+# folder; the actual Python package is at hy3dshape/hy3dshape/). The
+# same shape holds for hy3dpaint. TripoSG is a normal single-level
+# layout — the package is triposg/ at the repo root.
+HY3D_SHAPE_PKG="$WEIGHTS_DIR/src/Hunyuan3D-2.1/hy3dshape"
+HY3D_PAINT_PKG="$WEIGHTS_DIR/src/Hunyuan3D-2.1/hy3dpaint"
+TRIPOSG_PKG="$WEIGHTS_DIR/src/TripoSG"
+export POD_PYTHONPATH="$HY3D_SHAPE_PKG:$HY3D_PAINT_PKG:$TRIPOSG_PKG"
 
 # -- 5. Pre-pull HF weights (eager, so first /mesh is warm) -------------------
 log "step 5/7  download weights (this is the slow step: 10–20 min)"

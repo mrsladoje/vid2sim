@@ -53,24 +53,35 @@ python3 -m pip install -q \
     numpy Pillow trimesh pygltflib huggingface-hub pyyaml \
     transformers diffusers accelerate safetensors einops
 
-# -- 3. Clone / refresh the VID2SIM repo --------------------------------------
-log "step 3/7  clone repo"
-if [ -d "$REPO_DIR/.git" ]; then
-    git -C "$REPO_DIR" fetch --quiet origin main
-    git -C "$REPO_DIR" reset --quiet --hard origin/main
+# -- 3. Locate server code ----------------------------------------------------
+# Two paths:
+#   A. Files have already been scp'd into /workspace/ (private-repo path).
+#      Detect by presence of server.py + models_*.py at $WORKSPACE.
+#   B. Public repo — clone then copy.
+log "step 3/7  stage server code"
+if [ -f "$WORKSPACE/server.py" ] && \
+   [ -f "$WORKSPACE/models_hunyuan3d.py" ] && \
+   [ -f "$WORKSPACE/models_triposg.py" ]; then
+    log "  found pre-staged files at $WORKSPACE — skipping git clone"
 else
-    git clone -q "$REPO_URL" "$REPO_DIR"
+    if [ -d "$REPO_DIR/.git" ]; then
+        git -C "$REPO_DIR" fetch --quiet origin main
+        git -C "$REPO_DIR" reset --quiet --hard origin/main
+    else
+        git clone -q "$REPO_URL" "$REPO_DIR" || die \
+            "git clone of $REPO_URL failed — if the repo is private, \
+scp the files from your laptop instead (see infra/runpod/pod_bootstrap.sh header)."
+    fi
+    cp "$REPO_DIR/infra/runpod/server.py"            "$WORKSPACE/server.py"
+    cp "$REPO_DIR/infra/runpod/models_hunyuan3d.py"  "$WORKSPACE/models_hunyuan3d.py"
+    cp "$REPO_DIR/infra/runpod/models_triposg.py"    "$WORKSPACE/models_triposg.py"
+    cp "$REPO_DIR/infra/runpod/prewarm.py"           "$WORKSPACE/prewarm.py"
 fi
 
-# -- 4. Copy pod server files into /workspace so uvicorn finds them ----------
-log "step 4/7  stage server code"
-cp "$REPO_DIR/infra/runpod/server.py"              "$WORKSPACE/server.py"
-cp "$REPO_DIR/infra/runpod/models_hunyuan3d.py"    "$WORKSPACE/models_hunyuan3d.py"
-cp "$REPO_DIR/infra/runpod/models_triposg.py"      "$WORKSPACE/models_triposg.py"
-cp "$REPO_DIR/infra/runpod/prewarm.py"             "$WORKSPACE/prewarm.py"
+# Shift numbering: steps 4+ keep their original semantics.
 
-# -- 5. Install Hunyuan3D-2.1 and TripoSG-1.5B codebases ----------------------
-log "step 5/7  install image-to-3D model packages"
+# -- 4. Install Hunyuan3D-2.1 and TripoSG-1.5B codebases ----------------------
+log "step 4/7  install image-to-3D model packages"
 mkdir -p "$WEIGHTS_DIR"
 cd "$WEIGHTS_DIR"
 
@@ -90,8 +101,8 @@ fi
 python3 -m pip install -q -e "$WEIGHTS_DIR/src/TripoSG" \
     || log "  (TripoSG package install warning ignored)"
 
-# -- 6. Pre-pull HF weights (eager, so first /mesh is warm) -------------------
-log "step 6/7  download weights (this is the slow step: 10–20 min)"
+# -- 5. Pre-pull HF weights (eager, so first /mesh is warm) -------------------
+log "step 5/7  download weights (this is the slow step: 10–20 min)"
 export HF_HOME="$WEIGHTS_DIR/hf"
 mkdir -p "$HF_HOME"
 python3 - <<PY
@@ -105,8 +116,8 @@ for repo in ("tencent/Hunyuan3D-2.1", "VAST-AI/TripoSG"):
     print(f"  ✓ {repo}", flush=True)
 PY
 
-# -- 7. Launch the FastAPI server under tmux ---------------------------------
-log "step 7/7  launch server"
+# -- 6. Launch the FastAPI server under tmux ---------------------------------
+log "step 6/6  launch server"
 # Kill any previous instance so this script is re-runnable.
 tmux kill-session -t vid2sim 2>/dev/null || true
 sleep 1

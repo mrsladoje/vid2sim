@@ -19,15 +19,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import depthai as dai  # noqa: E402
 
 
-def build_pipeline(fps: int, preset: str = "DENSITY"):
+def build_pipeline(rgb_fps: int, stereo_fps: int, rgb_size: tuple[int, int], preset: str = "DENSITY"):
     p = dai.Pipeline()
     cam = p.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
     left = p.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
     right = p.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
 
-    rgb_out = cam.requestOutput((1280, 720), dai.ImgFrame.Type.NV12, fps=fps)
-    l_out = left.requestOutput((640, 400), dai.ImgFrame.Type.GRAY8, fps=fps)
-    r_out = right.requestOutput((640, 400), dai.ImgFrame.Type.GRAY8, fps=fps)
+    rgb_out = cam.requestOutput(rgb_size, dai.ImgFrame.Type.NV12, fps=rgb_fps)
+    # Stereo cameras stay at native mono resolution / fps — depth quality and
+    # USB bandwidth come from there, not from the RGB stream.
+    l_out = left.requestOutput((640, 400), dai.ImgFrame.Type.GRAY8, fps=stereo_fps)
+    r_out = right.requestOutput((640, 400), dai.ImgFrame.Type.GRAY8, fps=stereo_fps)
 
     stereo = p.create(dai.node.StereoDepth)
     stereo.setDefaultProfilePreset(getattr(dai.node.StereoDepth.PresetMode, preset))
@@ -53,7 +55,14 @@ def colourise_depth(depth_mm: np.ndarray, max_mm: int = 4000) -> np.ndarray:
 
 def main() -> int:
     ap = argparse.ArgumentParser(__doc__)
-    ap.add_argument("--fps", type=int, default=15)
+    ap.add_argument(
+        "--rgb-size", default="4k",
+        help="RGB resolution: '4k' (3840x2160), '1080p' (1920x1080), '720p' (1280x720), or 'WxH'",
+    )
+    ap.add_argument("--rgb-fps", type=int, default=5,
+                    help="RGB fps — low default because 4K over USB 2 is bandwidth-bound")
+    ap.add_argument("--stereo-fps", type=int, default=15,
+                    help="Mono + depth fps — independent of RGB fps")
     ap.add_argument("--max-depth-mm", type=int, default=4000)
     ap.add_argument(
         "--preset", default="DENSITY",
@@ -62,7 +71,21 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    pipeline, q = build_pipeline(args.fps, preset=args.preset)
+    rgb_presets = {"4k": (3840, 2160), "1080p": (1920, 1080), "720p": (1280, 720)}
+    if args.rgb_size.lower() in rgb_presets:
+        rgb_w, rgb_h = rgb_presets[args.rgb_size.lower()]
+    else:
+        rgb_w, rgb_h = (int(v) for v in args.rgb_size.lower().split("x"))
+
+    pipeline, q = build_pipeline(
+        rgb_fps=args.rgb_fps,
+        stereo_fps=args.stereo_fps,
+        rgb_size=(rgb_w, rgb_h),
+        preset=args.preset,
+    )
+    # 4K on a 1280x720 screen is unreadable — scale RGB window down for display
+    # without losing the underlying stream.
+    display_scale = min(1.0, 1280 / rgb_w)
     pipeline.start()
     print("Live preview — press 'q' in the window to quit.")
     first = True
@@ -80,12 +103,19 @@ def main() -> int:
                 first = False
             depth_vis = colourise_depth(depth, args.max_depth_mm)
             valid_pct = float((depth > 0).mean()) * 100
-            cv2.putText(rgb, f"RGB {rgb.shape[1]}x{rgb.shape[0]}",
-                        (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(rgb,
+                        f"RGB {rgb.shape[1]}x{rgb.shape[0]} @ {args.rgb_fps} fps",
+                        (12, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3, cv2.LINE_AA)
             cv2.putText(depth_vis,
                         f"depth {depth.shape[1]}x{depth.shape[0]}  preset={args.preset}  valid={valid_pct:4.1f}%",
                         (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.imshow("OAK-4 RGB", rgb)
+            if display_scale < 1.0:
+                rgb_disp = cv2.resize(rgb, (int(rgb.shape[1] * display_scale),
+                                            int(rgb.shape[0] * display_scale)),
+                                      interpolation=cv2.INTER_AREA)
+            else:
+                rgb_disp = rgb
+            cv2.imshow("OAK-4 RGB", rgb_disp)
             cv2.imshow("OAK-4 depth", depth_vis)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break

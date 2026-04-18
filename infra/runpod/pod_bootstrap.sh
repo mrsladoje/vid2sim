@@ -135,10 +135,14 @@ fi
 # folder; the actual Python package is at hy3dshape/hy3dshape/). The
 # same shape holds for hy3dpaint. TripoSG is a normal single-level
 # layout — the package is triposg/ at the repo root.
-HY3D_SHAPE_PKG="$WEIGHTS_DIR/src/Hunyuan3D-2.1/hy3dshape"
-HY3D_PAINT_PKG="$WEIGHTS_DIR/src/Hunyuan3D-2.1/hy3dpaint"
+HY3D_ROOT="$WEIGHTS_DIR/src/Hunyuan3D-2.1"
+HY3D_SHAPE_PKG="$HY3D_ROOT/hy3dshape"
+HY3D_PAINT_PKG="$HY3D_ROOT/hy3dpaint"
 TRIPOSG_PKG="$WEIGHTS_DIR/src/TripoSG"
-export POD_PYTHONPATH="$HY3D_SHAPE_PKG:$HY3D_PAINT_PKG:$TRIPOSG_PKG"
+# Both nested (.../hy3dshape/hy3dshape) and flat (.../hy3dshape) layouts
+# are covered by putting both the subproject dirs AND the repo root on
+# the path; importers pick whichever resolves first.
+export POD_PYTHONPATH="$HY3D_SHAPE_PKG:$HY3D_PAINT_PKG:$HY3D_ROOT:$TRIPOSG_PKG"
 
 # -- 5. Pre-pull HF weights (eager, so first /mesh is warm) -------------------
 log "step 5/7  download weights (this is the slow step: 10–20 min)"

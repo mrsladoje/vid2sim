@@ -119,21 +119,38 @@ def load(weights_dir: Path) -> _Hunyuan3DHandle:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
 
+    # NB: hy3dshape's pipeline's `.to()` is non-standard — it modifies
+    # the instance in-place and returns None instead of self. If we
+    # chain `.to(device)` we get shape_pipe=None. Keep the assignment
+    # separate, and only overwrite shape_pipe if .to() returned a new
+    # object (as a normal torch.nn.Module would).
     shape_pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-        _HF_REPO, subfolder="hunyuan3d-dit-v2-1", cache_dir=str(cache),
+        _HF_REPO, subfolder="hunyuan3d-dit-v2-1",
         torch_dtype=dtype,
-    ).to(device)
+    )
+    if shape_pipe is None:
+        raise RuntimeError("Hunyuan3D shape pipeline: from_pretrained returned None")
+    if hasattr(shape_pipe, "to"):
+        moved = shape_pipe.to(device)
+        if moved is not None:
+            shape_pipe = moved
 
     paint_pipe = None
     if Hunyuan3DPaintPipeline is not None:
         try:
             paint_pipe = Hunyuan3DPaintPipeline.from_pretrained(
-                _HF_REPO, subfolder="hunyuan3d-paintpbr-v2-1", cache_dir=str(cache),
+                _HF_REPO, subfolder="hunyuan3d-paintpbr-v2-1",
             )
+            if paint_pipe is not None and hasattr(paint_pipe, "to"):
+                moved = paint_pipe.to(device)
+                if moved is not None:
+                    paint_pipe = moved
         except Exception as exc:  # noqa: BLE001
             logger.warning("paint pipeline weights load failed (%s); "
                            "untextured meshes only", exc)
+            paint_pipe = None
 
-    logger.info("hunyuan3d loaded on %s (%s); paint_pipe=%s",
-                device, dtype, "enabled" if paint_pipe else "disabled")
+    logger.info("hunyuan3d loaded on %s (%s); shape_pipe=%s paint_pipe=%s",
+                device, dtype, type(shape_pipe).__name__,
+                "enabled" if paint_pipe else "disabled")
     return _Hunyuan3DHandle(shape_pipe, paint_pipe)

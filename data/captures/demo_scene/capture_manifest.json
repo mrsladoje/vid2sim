@@ -1,0 +1,13 @@
+{
+  "session_id": "demo_scene",
+  "device_serial": "synthetic",
+  "firmware_version": "synthetic-1.0",
+  "capture_fps": 15,
+  "frame_count": 1,
+  "class_prompts": [
+    "chair",
+    "table",
+    "cup"
+  ],
+  "timebase_ns": 1776536243431077120
+}

@@ -10,7 +10,7 @@
 
 ## 1. Executive summary
 
-VID2SIM turns a short RGB-D capture of a real-world scene into a portable, interactive physics simulation viewable in a browser. The pipeline fuses on-device stereo depth and monocular depth foundation models for robust metric geometry, uses image-to-3D diffusion to complete occluded geometry, and uses a vision-language model to infer per-object physics properties. The output is a simulator-agnostic scene specification (`scene.json`) with exporters to glTF, MJCF, USD, and PyBullet.
+VID2SIM turns a short RGB-D capture of a real-world scene into a portable, interactive physics simulation viewable in a browser. The pipeline fuses on-device stereo depth and monocular depth foundation models for robust metric geometry, uses image-to-3D diffusion to complete occluded geometry, and uses a vision-language model to infer per-object physics properties. The output is a simulator-agnostic scene specification (`scene.json`) with exporters to glTF, MJCF, USD, and MuJoCo.
 
 **One-line pitch:** Polycam-for-physics — point a camera at a room, get an interactive simulation in under a minute.
 
@@ -75,7 +75,7 @@ Primary demo user: hackathon judges clicking inside a browser.
 ```
    ┌──────── OAK-4 D Pro (edge) ────────┐
    │ RGB + LENS stereo depth + IMU       │
-   │ YOLO-World (on-NPU)                 │
+   │ YOLOE-26 (on-NPU)                   │
    │ ObjectTracker 3D                    │
    │ SpatialLocationCalculator           │
    └──────────────────┬──────────────────┘
@@ -108,7 +108,7 @@ The only contract between stages is the **`scene.json` spec** (see §9). All sta
 | Monocular depth | Depth Anything 3 `DA3METRIC-LARGE` (`depth-anything/DA3METRIC-LARGE` on HF) on M3 Max via MPS; metric-native — convert with `depth_m = focal_px · net_out / 300` |
 | Fusion method | Per-frame RANSAC least-squares `stereo ≈ s · DA3 + t`; DA3 fills stereo holes |
 | Multi-frame consistency | RTAB-Map VIO via the DepthAI v3 VSLAM host-node example (marked "early-access preview"; may require `depthai-core` develop branch) consuming RGB+D+IMU |
-| On-device segmentation | YOLO-World, prompt-driven open-vocabulary |
+| On-device segmentation | YOLOE-26 (+10 AP LVIS vs YOLO-World, 1.4× faster, Luxonis-supported on OAK-4 RVC4), prompt-driven open-vocabulary; optional edge SAM via EfficientSAM3 (RepViT/TinyViT backbones, MobileCLIP text encoder, ONNX+CoreML) — weights rolling out Q1 2026, bench at H0–H2 |
 | Per-object point clouds | Mask × fused depth → back-project in camera intrinsics |
 
 **Output**: a globally-consistent, metric-scale RGB-D + per-object point cloud set in a single world frame.
@@ -118,7 +118,7 @@ The only contract between stages is the **`scene.json` spec** (see §9). All sta
 | Concern | Decision |
 |---|---|
 | Primary model | Hunyuan3D 2.1 (Tencent) — DiT shape + Paint 2.1 PBR textures |
-| Fallback model | Stable Fast 3D for background / throughput |
+| Fallback model | TripoSG 1.5B (VAST-AI, Jan 2026, MIT) — rectified-flow, MPS-compatible, better quality than SF3D at similar throughput; Stable Fast 3D kept as emergency-only fallback if TripoSG fails on MPS |
 | Execution | Local on M3 Max via MPS using the `Brainkeys/Hunyuan3D-2.1-mac` community fork (flash-attn → SDPA, removes CUDA deps, PyTorch 2.5.1) |
 | Input | RGB crop + mask of each segmented object |
 | Output | Watertight mesh in unit cube, UV-mapped, PBR maps |
@@ -130,7 +130,8 @@ The only contract between stages is the **`scene.json` spec** (see §9). All sta
 
 | Concern | Decision |
 |---|---|
-| Primary inference | VLM call (Claude Opus 4.7 or Gemini 3.1) with RGB crop + class + room context |
+| Primary inference | VLM call (Claude Opus 4.7 primary, Gemini 3.1 Pro backup — Feb 2026, Video-MME 78.2%) with RGB crop + class + room context, wrapped with PhysQuantAgent-style visual prompting (visual markers overlaid on the crop — 2026 SOTA for physical-property estimation, arXiv 2603.16958; independent of the chosen VLM) |
+| Cheap-path fallback | Qwen3-VL-30B-A3B-Instruct — open-weights, ~45× cheaper than Opus 4.7, 252 t/s, native JSON mode. Bench on 50-object set at H0–H2 before committing to Opus as primary. |
 | Output schema | `{mass_kg, friction_coeff, restitution, material_class, is_rigid, reasoning}` |
 | Fallback | Class-label lookup table (`chair → 5 kg, μ=0.5, wood, rigid`) |
 | Confidence merge | Use VLM if confidence ≥ threshold; else fallback |
@@ -144,11 +145,11 @@ Source of truth: **`scene.json`** (see §9). Generated artifacts:
 | `scene.glb` (+ sidecar physics JSON; `KHR_physics_rigid_bodies` is still a draft extension, not ratified) | Custom | Three.js + Rapier viewer |
 | `scene.xml` | Custom MJCF emitter | MuJoCo / MJX |
 | `scene.usd` (UsdPhysics schema) | `usd-core` | Isaac Sim, Omniverse, Unreal, Blender |
-| `scene.py` | Template-driven | PyBullet headless |
+| `scene.py` | Template-driven | MuJoCo headless (`pip install mujoco` v3.3.2+, Apple-Silicon-native; MJX-on-Metal still experimental — stay on CPU MuJoCo) |
 
 ### Stage E — Pretty mode (optional, pre-recorded)
 
-Render the PyBullet / Rapier sim with depth + segmentation + normals buffers. Pass the depth sequence into **CogVideoX-Fun-V1.5-Control** (primary, Apache-2.0, ~12 GB on MPS) or **Wan 2.5 + VACE** (stretch) for motion-preserving prettification. Budget 30–90 s of wall time per 1 s of output video. Overnight render only; not on the critical path.
+Render the MuJoCo / Rapier sim with depth + segmentation + normals buffers. Pass the depth sequence into **LTX-2-19B + IC-LoRA-Depth-Control** (primary, Lightricks, HF `Lightricks/LTX-2-19b-IC-LoRA-Depth-Control`, Mar 2026; fallback `Lightricks/LTX-Video-ICLoRA-depth-13b-0.9.7`) for motion-preserving prettification. CogVideoX-Fun-V1.5-Control retained only as a known-to-boot safety net if LTX-2 fails on MPS. Stretch: Wan 2.2 Fun Control (GGUF) — current MPS support is flaky. Budget 30–90 s of wall time per 1 s of output video. Overnight render only; not on the critical path.
 
 ---
 
@@ -245,15 +246,15 @@ Schema file ships as `spec/scene.schema.json` (JSON Schema draft 2020-12). Every
 | Layer | Pick | Justification |
 |---|---|---|
 | Camera | OAK-4 D Pro | Stereo + IR projector + IMU + 52 TOPS NPU |
-| On-device models | LENS, YOLO-World, ObjectTracker, SpatialLocationCalc | First-class on Luxonis RVC4 |
+| On-device models | LENS, YOLOE-26, ObjectTracker, SpatialLocationCalc | First-class on Luxonis RVC4 |
 | Host SLAM | RTAB-Map (via DepthAI v3 nodes) | Bundled integration |
 | Monocular depth | Depth Anything 3 `DA3METRIC-LARGE` | Metric-native; fuses with stereo |
-| Image→3D | Hunyuan3D 2.1 via `Brainkeys/Hunyuan3D-2.1-mac` fork (hero) + Stable Fast 3D (fill) | Watertight PBR; MPS-compatible |
-| Physics LLM | Claude Opus 4.7 or Gemini 3.1 | Structured JSON output |
-| Physics engine | Rapier (browser) + PyBullet (export) | No-backend demo + headless option |
+| Image→3D | Hunyuan3D 2.1 via `Brainkeys/Hunyuan3D-2.1-mac` fork (hero) + TripoSG 1.5B (fallback) + SF3D (emergency) | Watertight PBR; MPS-compatible |
+| Physics LLM | Claude Opus 4.7 (primary), Gemini 3.1 Pro (backup), Qwen3-VL-30B-A3B-Instruct (cheap-path) — all wrapped with PhysQuantAgent-style visual prompting | Structured JSON output |
+| Physics engine | Rapier (browser) + MuJoCo (export, v3.3.2+) | No-backend demo + headless option |
 | Viewer | Three.js + Rapier WASM | 60 FPS, zero backend |
 | Scene spec | Custom typed JSON + exporters | Beats fighting USD's Python API in 24 h |
-| Pretty-pass (opt.) | CogVideoX-Fun-V1.5-Control | Motion-preserving prettification |
+| Pretty-pass (opt.) | LTX-2-19B + IC-LoRA-Depth-Control (CogVideoX-Fun-V1.5-Control safety net) | Motion-preserving prettification |
 
 **Explicitly out of scope**: Isaac Sim (no Apple Silicon), Genesis (install friction), Gaussian-splatting pipelines (poor browser/physics story), video diffusion on the critical path.
 
@@ -263,7 +264,7 @@ Schema file ships as `spec/scene.schema.json` (JSON Schema draft 2020-12). Every
 
 | Sponsor | Angle | Evidence in deliverable |
 |---|---|---|
-| **Luxonis** (Best Vision Hack) | On-device perception is essential, not decorative | LENS + YOLO-World + tracker all running on NPU |
+| **Luxonis** (Best Vision Hack) | On-device perception is essential, not decorative | LENS + YOLOE-26 + tracker all running on NPU |
 | **Guardiaris** (Most Innovative) | Capture-to-trainer for military / safety sims | USD exporter + demo narrative |
 | **Preskok** (B2B) | Plug-and-play edge product, no CAD | Scene spec + browser viewer |
 | **Zero Days** (Fun & scalable) | Click in browser, watch physics | The demo itself |
@@ -294,11 +295,11 @@ Hard rule: **no new features after H18**. Integration-only from then on.
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | OAK-4 S is the only camera available and its stereo pipeline behaves differently from D Pro | Medium | Re-benchmark at H0; if degraded, fall back to DA3-monocular only; pitch weakens but demo still works |
-| Hunyuan3D 2.1 won't run cleanly on MPS in time | Medium | Swap in Stable Fast 3D (SF3D, ~0.5 s per asset on CUDA; experimental on MPS with `PYTORCH_ENABLE_MPS_FALLBACK=1`); lose PBR quality, keep watertight |
+| Hunyuan3D 2.1 won't run cleanly on MPS in time | Medium | Swap in TripoSG 1.5B (rectified-flow, MPS-compatible, better than SF3D at similar throughput); SF3D is emergency-only if TripoSG also fails |
 | LENS stereo noisy on thin objects | Low | DA3 takes over per-object where mask is thin |
 | RTAB-Map VIO (early-access host node) fails to converge on short captures | Medium | Fall back to single-keyframe mode; on-device ObjectTracker gives coarse pose |
 | ICP mesh alignment drifts on symmetric or untextured objects | Medium | Seed with 2D BBox centroid + YOLO class prior; limit search to azimuth; cap iterations |
-| M3 Max thermal throttling during back-to-back Hunyuan3D runs | Medium | Run Stage B serially with cooldown gaps; monitor `powermetrics`; fall back to SF3D if sustained throttle |
+| M3 Max thermal throttling during back-to-back Hunyuan3D runs | Medium | Run Stage B serially with cooldown gaps; monitor `powermetrics`; fall back to TripoSG 1.5B (SF3D emergency) if sustained throttle |
 | Browser WASM memory ceiling on scenes with many large meshes | Low | Cap at 8 objects per scene (matches NFR); decimate Hunyuan3D output if >50k tris/object |
 | Pretty-mode video diffusion takes too long | High | Pre-render the one demo clip overnight; keep off critical path |
 | Demo laptop crashes mid-pitch | Low | Record a 30 s demo video as backup; play if needed |
@@ -329,12 +330,17 @@ Hard rule: **no new features after H18**. Integration-only from then on.
 
 1. **Which camera is actually in hand — S, D, or D Pro?** Blocking decision. Confirm before H0. OAK-4 S *does* have a stereo pair per the Luxonis shop page, but we have not benchmarked LENS on it; the pipeline was specced against D Pro.
 2. **VLM call latency** — acceptable inside the 90 s budget? Needs a quick bench (batched single call vs. per-object).
-3. **Mesh convex decomposition** — V-HACD in Python during assembly, or in-browser before Rapier init? Pick at H10.
+3. **Mesh convex decomposition** — CoACD 1.0.10 (`pip install coacd`, CPU-only, collision-aware, fewer+tighter hulls than V-HACD) in Python during assembly, or in-browser before Rapier init? Pick at H10.
 4. **Demo scene selection** — pick one reproducible room ahead of time (the venue table?) and rehearse the capture.
-5. **Pretty-mode depth source** — use Rapier's depth buffer or re-render via PyBullet? Decide at H16.
-6. **Dynamic triangle-mesh colliders in Rapier** — Rapier supports trimesh colliders but they are primarily intended as *static* colliders; for dynamic rigid bodies we need convex decomposition. Confirm V-HACD tolerance per object class at H10.
+5. **Pretty-mode depth source** — use Rapier's depth buffer or re-render via MuJoCo? Decide at H16.
+6. **Dynamic triangle-mesh colliders in Rapier** — Rapier supports trimesh colliders but they are primarily intended as *static* colliders; for dynamic rigid bodies we need convex decomposition. Confirm CoACD 1.0.10 tolerance per object class at H10.
 7. **Hunyuan3D per-object wall time on MPS** — fork README claims feasibility but no hard number published; bench one asset at H0–H2 and set a per-object budget before committing to the 90 s scene target.
 8. **KHR_physics_rigid_bodies** is still a draft glTF extension. We ship a sidecar physics JSON alongside the `.glb` to avoid depending on a non-ratified extension; revisit if the spec lands mid-hackathon.
+9. **LTX-2-19B + IC-LoRA-Depth-Control per-frame latency on M3 Max MPS** — no public number; bench at H0–H2. Blocking for Stage E budget.
+10. **Qwen3-VL-30B-A3B JSON-mode accuracy vs Claude Opus 4.7** — run 50-object physics-property test set at H0–H2 before committing to Opus as primary. Blocking.
+11. **EfficientSAM3 Q1 2026 weights availability and accuracy on our target class list** — confirm release + bench at H0–H2. Blocking for edge-SAM path.
+12. **TripoSG 1.5B per-asset wall time and mesh watertightness on M3 Max** — bench at H0–H2. Blocking for fallback commitment.
+13. **DA3 RVC4 port status** — still no public `.dlc` as of April 2026; run off-device on M3 Max. Revisit if Luxonis ships a port.
 
 ---
 
@@ -342,10 +348,17 @@ Hard rule: **no new features after H18**. Integration-only from then on.
 
 - Depth Anything 3 — arXiv 2511.10647, github.com/ByteDance-Seed/Depth-Anything-3
 - Hunyuan3D 2.1 — github.com/Tencent-Hunyuan/Hunyuan3D-2.1
-- Stable Fast 3D — huggingface.co/stabilityai/stable-fast-3d
+- TripoSG 1.5B — VAST-AI, Jan 2026, MIT
+- Stable Fast 3D — huggingface.co/stabilityai/stable-fast-3d (emergency fallback only)
+- YOLOE-26 — successor to YOLO-World (+10 AP LVIS, 1.4× faster, Luxonis-supported)
+- EfficientSAM3 — RepViT/TinyViT + MobileCLIP text encoder, ONNX+CoreML
 - DepthAI v3 — docs.luxonis.com/software-v3/depthai/
 - Rapier — github.com/dimforge/rapier
-- CogVideoX-Fun — github.com/aigc-apps/CogVideoX-Fun
+- MuJoCo — mujoco.readthedocs.io (v3.3.2+)
+- CoACD — github.com/SarahWeiii/CoACD (`pip install coacd`)
+- LTX-2-19B + IC-LoRA-Depth-Control — huggingface.co/Lightricks/LTX-2-19b-IC-LoRA-Depth-Control
+- CogVideoX-Fun — github.com/aigc-apps/CogVideoX-Fun (safety-net only)
+- PhysQuantAgent visual prompting — arXiv 2603.16958
 - OpenUSD — openusd.org
 - PhysGaussian / PhysTwin / PhysDreamer (context only, not used directly)
 

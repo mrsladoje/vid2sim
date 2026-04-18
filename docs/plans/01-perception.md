@@ -11,7 +11,7 @@ See also: [`../PHASED_PLAN.md`](../PHASED_PLAN.md), [`../adr/ADR-002-hybrid-dept
 **Owns**
 - DepthAI v3 YAML pipeline definition (on-NPU nodes + host-node wiring).
 - LENS neural stereo depth (on-device), NFOV mode.
-- YOLO-World open-vocabulary segmentation (on-NPU), class list from a capture-time config file.
+- YOLOE-26 open-vocabulary segmentation (on-NPU; +10 AP LVIS vs YOLO-World, 1.4× faster, Luxonis-supported on OAK-4 RVC4), class list from a capture-time config file. Optional edge SAM via EfficientSAM3 (RepViT/TinyViT + MobileCLIP text encoder, ONNX+CoreML) — weights rolling out Q1 2026, bench at H0–H2.
 - ObjectTracker 3D + SpatialLocationCalculator (on-NPU).
 - IMU capture at native rate (BMI270, 400 Hz).
 - Host-side capture script that receives the stream over USB-C and writes a `PerceptionFrame` bundle to disk.
@@ -36,7 +36,7 @@ See also: [`../PHASED_PLAN.md`](../PHASED_PLAN.md), [`../adr/ADR-002-hybrid-dept
 | **Confidence mask** | Per-pixel uint8 from LENS (0 = invalid, 255 = high confidence). |
 | **Track id** | Stable integer assigned by ObjectTracker 3D across frames for one physical object. |
 | **LENS** | Luxonis neural stereo depth model running on the camera NPU. |
-| **Class prompt set** | The list of open-vocabulary labels fed to YOLO-World at capture start (e.g. `["chair", "table", "cup", "bottle"]`). |
+| **Class prompt set** | The list of open-vocabulary labels fed to YOLOE-26 at capture start (e.g. `["chair", "table", "cup", "bottle"]`). |
 | **Capture manifest** | JSON header describing device serial, firmware, intrinsics, class prompts, timebase. |
 
 ---
@@ -88,7 +88,7 @@ Anti-corruption layer: nothing from DepthAI internal types leaks. Everything is 
 | G0 | H0–H2 | Freeze PerceptionFrame on-disk format with Person 2 | Draft spec in `spec/perception_frame.md`; walk through with Person 2; get signoff | `spec/perception_frame.md` v1.0 |
 | **G0 gate** | H2 | Format frozen, camera alive | — | — |
 | G1 | H2–H6 | Offline-replayable stub capture | Record 10 s using `depthai-viewer` default pipeline; convert to the bundle format with a converter script | `data/captures/stub_01/` |
-| G1 | H2–H6 | DepthAI v3 pipeline YAML v1 | Nodes: ColorCamera, StereoDepth (LENS), YoloWorld, ObjectTracker, SpatialLocationCalculator, IMU, XLinkOut for each | `src/perception/pipelines/capture_v1.yaml` |
+| G1 | H2–H6 | DepthAI v3 pipeline YAML v1 | Nodes: ColorCamera, StereoDepth (LENS), YOLOE-26, ObjectTracker, SpatialLocationCalculator, IMU, XLinkOut for each | `src/perception/pipelines/capture_v1.yaml` |
 | G1 | H2–H6 | Host ingest daemon | Python script subscribing to XLink queues, aligning timestamps, writing to bundle dir | `src/perception/capture.py` |
 | G1 | H2–H6 | Intrinsics exporter | Pull calibration from device, emit `intrinsics.json` | `src/perception/calib.py` |
 | **G1 gate** | H6 | End-to-end synthetic capture runs; Person 2 can read a bundle without Person 1 present | — | — |
@@ -128,7 +128,7 @@ Each gate must be green before advancing. If red: follow the mitigation column.
 |---|---|---|
 | Only OAK-4 S available, not D Pro | Medium | Accept: pipeline still runs, LENS unverified on S — flag in README, continue. Decision point H0. |
 | LENS produces holes on glossy table | High | Expected — Person 2's DA3 fusion compensates. Ensure confidence mask is exported so Person 2 can trust-weight it. |
-| YOLO-World drops objects between frames | Medium | ObjectTracker bridges gaps; if still losing tracks, relax confidence threshold and accept more false positives. |
+| YOLOE-26 drops objects between frames | Medium | ObjectTracker bridges gaps; if still losing tracks, relax confidence threshold and accept more false positives. |
 | USB-C disconnect mid-capture | Low | Host ingest writes frames incrementally, not at end; a truncated bundle is still usable. |
 | DepthAI v3 VSLAM host node unavailable | Medium | Don't use it from the perception side. Camera emits per-frame on-device pose estimate only; Person 2 owns real pose via RTAB-Map. |
 | Thermal throttle during long capture | Low | Cap captures at 15 s. If stream drops below 10 FPS, abort and rerecord. |

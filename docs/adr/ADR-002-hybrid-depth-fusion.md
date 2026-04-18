@@ -46,6 +46,12 @@ Stereo remains the **metric anchor** (it provides real scale). DA3 is the **fill
 
 **Neutral**
 - The fusion is deliberately simple (affine in depth space). If quality proves insufficient, the seam to swap in a richer model is narrow.
+- Verified April 2026 — SOTA check passed, see commit history.
+
+## Open questions
+
+- DA3 per-frame throughput on M3 Max MPS — first-hour bench.
+- DA3 RVC4 port status (still no public `.dlc` as of April 2026 — run off-device on M3 Max).
 
 ## References
 

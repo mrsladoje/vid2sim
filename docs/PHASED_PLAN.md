@@ -4,20 +4,20 @@
 
 ## Project summary
 
-VID2SIM turns a 5–15 s RGB-D capture from an **OAK-4 D Pro** into a **browser-playable, physics-ready 3D scene** in under 90 s of offline compute on an M3 Max. The pipeline is: on-device perception (LENS + YOLO-World + IMU) → host fusion (stereo + DA3METRIC-LARGE) + VIO → per-object completion (Hunyuan3D 2.1) + VLM physics properties (Claude Opus 4.7) → the single published contract `scene.json` → exporters (glTF+sidecar / MJCF / PyBullet / USD) → a static Three.js + Rapier WASM viewer. The 24-hour build is split across **4 bounded contexts** with **1 hard schema freeze at H2** and **5 global phase gates**.
+VID2SIM turns a 5–15 s RGB-D capture from an **OAK-4 D Pro** into a **browser-playable, physics-ready 3D scene** in under 90 s of offline compute on an M3 Max. The pipeline is: on-device perception (LENS + YOLOE-26 + IMU) → host fusion (stereo + DA3METRIC-LARGE) + VIO → per-object completion (Hunyuan3D 2.1 / TripoSG 1.5B fallback) + VLM physics properties (Claude Opus 4.7 primary, Gemini 3.1 Pro / Qwen3-VL-30B-A3B alternates, all with PhysQuantAgent-style visual prompting) → the single published contract `scene.json` → exporters (glTF+sidecar / MJCF / MuJoCo `.py` / USD) → a static Three.js + Rapier WASM viewer. The 24-hour build is split across **4 bounded contexts** with **1 hard schema freeze at H2** and **5 global phase gates**.
 
 ## Bounded-context diagram
 
 ```mermaid
 flowchart LR
   subgraph P1["Person 1 · Perception"]
-    P1A[OAK-4 D Pro · LENS · YOLO-World · IMU]
+    P1A[OAK-4 D Pro · LENS · YOLOE-26 · IMU]
   end
   subgraph P2["Person 2 · Reconstruction"]
-    P2A[DA3 + RANSAC fusion · RTAB-Map VIO · Hunyuan3D/SF3D · ICP align]
+    P2A[DA3 + RANSAC fusion · RTAB-Map VIO · Hunyuan3D/TripoSG/SF3D · ICP align]
   end
   subgraph P3["Person 3 · Scene Assembly (schema owner)"]
-    P3A[VLM physics · V-HACD · Assembler · Exporters]
+    P3A[VLM physics (PhysQuantAgent prompting) · CoACD · Assembler · Exporters]
   end
   subgraph P4["Person 4 · Presentation"]
     P4A[Three.js+Rapier viewer · Choreography · Pretty-mode · Deck]
@@ -48,11 +48,11 @@ The three published contracts — **PerceptionFrame**, **ReconstructedObject**, 
 | **Scene object** | One entry in `scene.json.objects[]`. |
 | **SceneSpec** | The `scene.json` file + its mesh directory (schema-versioned contract). |
 | **Physics block** | `{mass_kg, friction, restitution, is_rigid}` per scene object. |
-| **Convex decomposition** | N-hulls collision proxy for a dynamic rigid body (V-HACD). |
+| **Convex decomposition** | N-hulls collision proxy for a dynamic rigid body (CoACD 1.0.10; V-HACD superseded). |
 | **Sidecar physics JSON** | `scene.glb.physics.json` — avoids unratified `KHR_physics_rigid_bodies`. |
 | **Provenance** | Origin tags per artifact: `depth_origin`, `pose_origin`, `mesh_origin`, `physics_origin`. |
 | **Lookup table** | Class → default physics block; VLM fallback. |
-| **Pretty mode** | Pre-rendered overnight video prettification via CogVideoX-Fun; off critical path. |
+| **Pretty mode** | Pre-rendered overnight video prettification via LTX-2-19B + IC-LoRA-Depth-Control (CogVideoX-Fun safety-net); off critical path. |
 | **Choreography** | The 90-s scripted pitch interaction sequence. |
 | **Kill-switch clip** | Backup demo video played if live demo fails. |
 | **Gate (G0–G5)** | Global synchronisation point where all 4 streams check in. |
@@ -63,7 +63,7 @@ The three published contracts — **PerceptionFrame**, **ReconstructedObject**, 
 |---|---|---|---|---|---|
 | H0–H2 | **G0** | Hardware alive; PerceptionFrame format drafted | DA3 + Hunyuan3D bench logged; RecObj contract drafted | **scene.schema.json v1.0 FROZEN**; example fixture published | Viewer boot; renders example fixture with physics |
 | H2–H6 | **G1** | Stub capture bundle on disk; pipeline YAML v1 | Fusion + backproject + stub RecObj emitter | Assembler v0 on stubs; glTF+sidecar + MJCF exporters | All 4 interaction modes; stub scene loads |
-| H6–H12 | **G2** | Hero object capture (`hero_01`) | Hero RecObj end-to-end: fused depth → Hunyuan3D → ICP → mesh.glb | VLM + V-HACD + ground plane; hero scene.json + exports | Hero scene interactive; deck draft; pretty bench |
+| H6–H12 | **G2** | Hero object capture (`hero_01`) | Hero RecObj end-to-end: fused depth → Hunyuan3D → ICP → mesh.glb | VLM + CoACD + ground plane; hero scene.json + exports | Hero scene interactive; deck draft; pretty bench |
 | H12–H18 | **G3** | Demo scene + backup bundles; replay mode | Full demo scene RecObjs; thermal watchdog | Full demo `scene.json` + 3–4 exporters | Full demo scene at 60 FPS; choreography rehearsed; backup video |
 | H18–H22 | **G4** | Run-book + 80% coverage on converter | 80% coverage on fusion + ICP; CI green | 80% coverage on exporters; schema docs | Pretty-mode overnight render; 2 dry-runs; deploy viewer |
 | H22–H24 | **G5** | Demo standby | Demo standby | Demo standby | Final rehearsal; kill-switch primed |
@@ -75,8 +75,8 @@ The three published contracts — **PerceptionFrame**, **ReconstructedObject**, 
 | # | Person | Bounded context | One-line scope | Plan |
 |---|---|---|---|---|
 | 1 | Person 1 | **Perception** | OAK-4 D Pro on-device pipeline → PerceptionFrame bundle on disk | [`plans/01-perception.md`](plans/01-perception.md) |
-| 2 | Person 2 | **Reconstruction** | PerceptionFrame → fused depth + VIO + Hunyuan3D + ICP → ReconstructedObject set | [`plans/02-reconstruction.md`](plans/02-reconstruction.md) |
-| 3 | Person 3 | **Scene Assembly** | Schema owner. ReconstructedObject → `scene.json` + glTF/MJCF/PyBullet/USD exporters | [`plans/03-scene-assembly.md`](plans/03-scene-assembly.md) |
+| 2 | Person 2 | **Reconstruction** | PerceptionFrame → fused depth + VIO + Hunyuan3D (TripoSG fallback) + ICP → ReconstructedObject set | [`plans/02-reconstruction.md`](plans/02-reconstruction.md) |
+| 3 | Person 3 | **Scene Assembly** | Schema owner. ReconstructedObject → `scene.json` + glTF/MJCF/MuJoCo `.py`/USD exporters | [`plans/03-scene-assembly.md`](plans/03-scene-assembly.md) |
 | 4 | Person 4 | **Presentation** | Three.js + Rapier viewer + choreography + pretty-mode + pitch deck | [`plans/04-presentation.md`](plans/04-presentation.md) |
 
 ## Cross-team contracts
@@ -99,7 +99,7 @@ Every stream must meet its row of each gate before the team advances. Gates are 
 
 - **Blocks all stream-specific work until green.**
 - **P1**: camera enumerates; PerceptionFrame format draft; confirm S vs D Pro.
-- **P2**: DA3 and Hunyuan3D bench numbers logged; RecObj contract drafted; MPS env stable.
+- **P2**: DA3, Hunyuan3D, and TripoSG bench numbers logged; RecObj contract drafted; MPS env stable.
 - **P3**: **`spec/scene.schema.json` v1.0 is frozen**, `scene.example.json` validates, signoff from P1/P2/P4.
 - **P4**: viewer skeleton builds; renders `scene.example.json` with Three.js + Rapier in-browser.
 - **Global**: CI green on empty skeletons; repo scaffolding (src/, tests/, spec/, data/, docs/, web/) merged.
@@ -116,15 +116,15 @@ Every stream must meet its row of each gate before the team advances. Gates are 
 
 - **P1**: `data/captures/hero_01/` exists with mask quality ≥0.6 IoU.
 - **P2**: `data/reconstructed/hero_01/` has a correctly-scaled, world-posed, watertight mesh with full provenance.
-- **P3**: `data/scenes/hero_01/` emitted; VLM + lookup both wired; V-HACD active.
+- **P3**: `data/scenes/hero_01/` emitted; VLM (with PhysQuantAgent visual prompting) + lookup both wired; CoACD 1.0.10 active.
 - **P4**: hero scene loads in viewer; deck draft exists; pretty-mode bench number logged.
-- **Global**: Hunyuan3D MPS budget decision locked (H10): primary = Hunyuan3D or primary = SF3D.
+- **Global**: Hunyuan3D MPS budget decision locked (H10): primary = Hunyuan3D or primary = TripoSG 1.5B (SF3D emergency only).
 
 ### G3 — H18 · Full demo scene; FEATURE FREEZE
 
 - **P1**: demo scene + backup bundle + replay mode verified.
 - **P2**: `data/reconstructed/demo_scene/` with 3–5 objects, provenance clean.
-- **P3**: full `scene.json` + glTF/MJCF/PyBullet (+USD stretch) exports complete.
+- **P3**: full `scene.json` + glTF/MJCF/MuJoCo `.py` (+USD stretch) exports complete.
 - **P4**: full scene at 60 FPS; choreography rehearsed; `backup_demo.mp4` recorded.
 - **Global**: **no new features after this point**. Integration-only.
 

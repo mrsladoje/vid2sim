@@ -20,7 +20,7 @@ Rapier runs client-side in WebAssembly. All physics interactions (drop ball, app
 ## Alternatives Considered
 
 - **Electron app.** Rejected: distribution complexity, larger binary, slower iteration, no real upside over a browser page.
-- **Python web server streaming PyBullet over WebSocket.** Rejected: demo-fragile (port clashes, server restarts, Python env drift), adds 30–80 ms of latency per interaction, and introduces a backend dependency that will fail at the worst moment.
+- **Python web server streaming MuJoCo (or the previously-considered PyBullet) over WebSocket.** Rejected: demo-fragile (port clashes, server restarts, Python env drift), adds 30–80 ms of latency per interaction, and introduces a backend dependency that will fail at the worst moment. MuJoCo is still our export target (ADR-004); it just doesn't ride the demo wire.
 - **Unity WebGL.** Rejected: build toolchain and project setup cost is too high for 24h; Unity's WebGL export is also heavyweight.
 
 ## Consequences
@@ -38,6 +38,7 @@ Rapier runs client-side in WebAssembly. All physics interactions (drop ball, app
 
 **Neutral**
 - Static hosting is trivial; a GitHub Pages or Vercel deploy is fine.
+- Verified April 2026 — SOTA check passed, see commit history.
 
 ## References
 

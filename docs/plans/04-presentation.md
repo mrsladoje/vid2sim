@@ -15,7 +15,7 @@ See also: [`../PHASED_PLAN.md`](../PHASED_PLAN.md), [`../adr/ADR-006-browser-nat
 - On-screen info panel (object class, mass, friction, material, VLM reasoning).
 - Performance budget: ≥60 FPS on M3 Max; graceful degradation on lower hardware.
 - **Demo scene script / choreography** — the 90-second pitch interaction sequence.
-- **Pretty-mode video** — pre-rendered clip via CogVideoX-Fun-V1.5-Control (primary) or Wan 2.5+VACE (stretch). Overnight render only.
+- **Pretty-mode video** — pre-rendered clip via **LTX-2-19B + IC-LoRA-Depth-Control** (primary, Lightricks, HF `Lightricks/LTX-2-19b-IC-LoRA-Depth-Control`, Mar 2026; fallback `Lightricks/LTX-Video-ICLoRA-depth-13b-0.9.7`). CogVideoX-Fun-V1.5-Control kept only as a known-to-boot safety net if LTX-2 fails on MPS. Stretch: Wan 2.2 Fun Control (GGUF, flaky MPS support). Overnight render only.
 - **Pitch deck** + dry-runs + backup demo video recording.
 
 **Does not own**
@@ -46,7 +46,7 @@ See also: [`../PHASED_PLAN.md`](../PHASED_PLAN.md), [`../adr/ADR-006-browser-nat
 | Person 3 | `spec/scene.example.json` | Hand-crafted fixture (available at H2) — **this is how Person 4 starts coding immediately** |
 | Person 3 | `data/scenes/demo_scene/` | Real scene at G3 (H18) |
 | — | Three.js, Rapier3D WASM, `gltf-transform`, Vite/esbuild | npm |
-| — | CogVideoX-Fun-V1.5-Control (or Wan 2.5+VACE stretch) | HuggingFace |
+| — | LTX-2-19B + IC-LoRA-Depth-Control (primary); CogVideoX-Fun-V1.5-Control (safety net); Wan 2.2 Fun Control GGUF (stretch) | HuggingFace |
 
 Anti-corruption layer: the viewer only touches glTF + sidecar. It does not reach into `data/reconstructed/` or `data/captures/`. Its type model (`SceneObject`, `PhysicsBody`) is its own, built by reading the schema — nothing leaks in from other streams' internals.
 
@@ -87,13 +87,13 @@ No downstream consumer other than the judges.
 | G1 | H2–H6 | Interaction modes v1 | `select`, `drop_ball`, `apply_force`, `reset` wired to UI radio; click-to-select highlighting | `web/src/ui.ts` |
 | G1 | H2–H6 | Info panel | Shows selected object's class, mass, friction, material, VLM reasoning | UI |
 | G1 | H2–H6 | Load Person 3's stub scene | Swap `scene.example.json` for `data/scenes/stub_01/scene.glb` + sidecar — same code path | integration smoke |
-| G1 | H2–H6 | Pretty-mode rendering harness scaffold | Script that takes a PyBullet/Rapier sim replay + depth buffer → CogVideoX-Fun call; no actual call yet | `demo/render_pretty.py` skeleton |
+| G1 | H2–H6 | Pretty-mode rendering harness scaffold | Script that takes a MuJoCo/Rapier sim replay + depth buffer → LTX-2 IC-LoRA call (CogVideoX-Fun safety net); no actual call yet | `demo/render_pretty.py` skeleton |
 | **G1 gate** | H6 | Stub scene interactive; all 4 modes work; 60 FPS on M3 Max | — | — |
 | G2 | H6–H12 | Choreography v1 | Write pitch script: load → interact → export; time it to 90 s | `demo/choreography.md` |
 | G2 | H6–H12 | Load hero-object scene | Real `data/scenes/hero_01/scene.glb` loads | — |
 | G2 | H6–H12 | Visual polish | Lighting (HDRI env map), shadows, post-processing (bloom, SSAO optional) | — |
 | G2 | H6–H12 | Pitch deck v1 | 10-slide draft: problem, gap, pipeline, demo, sponsors, asks | `demo/pitch_deck.pdf` draft |
-| G2 | H6–H12 | Kick off overnight pretty-mode bench | One short clip through CogVideoX-Fun-V1.5-Control to gauge wall time | `demo/bench_pretty.md` |
+| G2 | H6–H12 | Kick off overnight pretty-mode bench | One short clip through LTX-2-19B + IC-LoRA-Depth-Control (fall back to CogVideoX-Fun-V1.5-Control if LTX-2 fails on MPS) to gauge wall time | `demo/bench_pretty.md` |
 | **G2 gate** | H12 | Real hero scene interactive; 10-slide draft deck; pretty-mode harness benched | — | — |
 | G3 | H12–H18 | Load full demo scene (3–5 objects) | Works in viewer at 60 FPS | integration smoke |
 | G3 | H12–H18 | Choreography final | Timed to the second; rehearsed twice | `demo/choreography.md` v2 |
@@ -131,7 +131,7 @@ No downstream consumer other than the judges.
 | Rapier dynamic trimesh limitation | Known | Require Person 3 to provide convex decomposition; viewer refuses to make dynamic trimesh bodies. |
 | WASM memory blows up on >8 objects | Low | Cap scene at 8 (matches NFR); decimate or drop. |
 | Venue wifi blocks CDN fetch of Rapier WASM | Medium | Bundle Rapier WASM into `dist/`; serve fully offline from `file://`. |
-| CogVideoX-Fun render takes >12 h overnight | High | Pre-record a shorter (5–10 s) clip; or skip pretty-mode and rely on live demo. Kick off at H16 to have the full night. |
+| LTX-2 / CogVideoX-Fun render takes >12 h overnight | High | Pre-record a shorter (5–10 s) clip; or skip pretty-mode and rely on live demo. Kick off at H16 to have the full night. |
 | Live demo laptop crashes on stage | Low | `backup_demo.mp4` is the kill switch. Queen hits play. |
 | Schema changes after Person 4 starts coding | Medium | **Enforce "no breaking changes after G1" rule** with Person 3; version bump requires explicit Queen signoff. |
 

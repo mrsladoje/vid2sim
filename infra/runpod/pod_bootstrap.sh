@@ -27,13 +27,32 @@ log "weights:    $WEIGHTS_DIR"
 log "repo dir:   $REPO_DIR"
 log "port:       $PORT"
 
+# -- 0. Persist the authorized key across pod restarts ----------------------
+# RunPod pod restarts wipe the container filesystem (including
+# /root/.ssh/authorized_keys) but preserve /workspace/. We store the
+# laptop's public key under /workspace/ and re-install it on every boot
+# so direct-TCP scp keeps working after restarts without manual steps.
+LAPTOP_PUBKEY_STORE="$WORKSPACE/.ssh/id_ed25519.pub"
+if [ -f "$LAPTOP_PUBKEY_STORE" ]; then
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    cat "$LAPTOP_PUBKEY_STORE" >> /root/.ssh/authorized_keys 2>/dev/null || true
+    # de-duplicate in case we've re-appended
+    sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+    log "step 0/6  authorized_keys restored from $LAPTOP_PUBKEY_STORE"
+else
+    log "step 0/6  no persisted pubkey at $LAPTOP_PUBKEY_STORE"
+    log "          (paste one to persist: mkdir -p $WORKSPACE/.ssh && \\"
+    log "           echo 'ssh-ed25519 AAA...' > $LAPTOP_PUBKEY_STORE)"
+fi
+
 # -- 1. GPU sanity check ------------------------------------------------------
-log "step 1/7  gpu probe"
+log "step 1/6  gpu probe"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \
     || die "no CUDA GPU visible — is this a GPU pod?"
 
 # -- 2. Python + core deps ----------------------------------------------------
-log "step 2/7  system + python deps"
+log "step 2/6  system + python deps"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
@@ -58,7 +77,7 @@ python3 -m pip install -q \
 #   A. Files have already been scp'd into /workspace/ (private-repo path).
 #      Detect by presence of server.py + models_*.py at $WORKSPACE.
 #   B. Public repo — clone then copy.
-log "step 3/7  stage server code"
+log "step 3/6  stage server code"
 if [ -f "$WORKSPACE/server.py" ] && \
    [ -f "$WORKSPACE/models_hunyuan3d.py" ] && \
    [ -f "$WORKSPACE/models_triposg.py" ]; then

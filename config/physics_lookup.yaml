@@ -1,0 +1,30 @@
+# Class → default physics block (plan §5 G1).
+# Used as (a) offline fallback when the VLM is unreachable, and (b) silent
+# fallback when the VLM returns a schema-invalid response. Friction is the
+# object-ground friction coefficient; restitution is bounciness [0..1];
+# mass is in kilograms.
+#
+# Numbers are conservative indoor-scene defaults. Tune per demo scene.
+
+__default__:
+  mass_kg: 1.0
+  friction: 0.5
+  restitution: 0.2
+  is_rigid: true
+  material: unknown
+
+chair:       { mass_kg: 5.0,  friction: 0.45, restitution: 0.2,  is_rigid: true, material: wood }
+table:       { mass_kg: 15.0, friction: 0.5,  restitution: 0.1,  is_rigid: true, material: wood }
+sofa:        { mass_kg: 45.0, friction: 0.7,  restitution: 0.05, is_rigid: true, material: fabric }
+bed:         { mass_kg: 60.0, friction: 0.6,  restitution: 0.05, is_rigid: true, material: fabric }
+bookshelf:   { mass_kg: 35.0, friction: 0.55, restitution: 0.1,  is_rigid: true, material: wood }
+book:        { mass_kg: 0.8,  friction: 0.4,  restitution: 0.1,  is_rigid: true, material: paper }
+mug:         { mass_kg: 0.35, friction: 0.5,  restitution: 0.15, is_rigid: true, material: ceramic }
+cup:         { mass_kg: 0.25, friction: 0.5,  restitution: 0.2,  is_rigid: true, material: ceramic }
+bottle:      { mass_kg: 0.5,  friction: 0.3,  restitution: 0.3,  is_rigid: true, material: plastic }
+ball:        { mass_kg: 0.45, friction: 0.6,  restitution: 0.75, is_rigid: true, material: rubber }
+laptop:      { mass_kg: 1.8,  friction: 0.45, restitution: 0.1,  is_rigid: true, material: metal }
+lamp:        { mass_kg: 1.5,  friction: 0.5,  restitution: 0.15, is_rigid: true, material: metal }
+plant:       { mass_kg: 2.5,  friction: 0.5,  restitution: 0.05, is_rigid: true, material: ceramic }
+apple:       { mass_kg: 0.18, friction: 0.5,  restitution: 0.3,  is_rigid: true, material: unknown }
+orange:      { mass_kg: 0.15, friction: 0.5,  restitution: 0.35, is_rigid: true, material: unknown }

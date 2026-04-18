@@ -150,6 +150,14 @@ if [ ! -f "$VENV_STAMP" ]; then
     "$PIPBIN" install -q --no-build-isolation diso \
         || log "  (diso build failed — Paint pipeline may fall back)"
 
+    # bpy (Blender Python API) — needed by hy3dpaint.textureGenPipeline
+    # for UV unwrap + PBR texture baking. The hunyuan3d requirements
+    # pinned bpy==4.0 which isn't on PyPI for py3.11; install the newest
+    # compatible version and tolerate failure (untextured meshes still
+    # serve).
+    "$PIPBIN" install -q 'bpy>=4.2' \
+        || log "  (bpy install failed — meshes will be untextured)"
+
     touch "$VENV_STAMP"
     log "  ✓ venv dep install complete (future restarts skip this step)"
 else

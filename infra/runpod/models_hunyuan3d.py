@@ -23,11 +23,17 @@ _HF_REPO = "tencent/Hunyuan3D-2.1"
 
 
 class _Hunyuan3DHandle:
-    """Handle returned by :func:`load`. The server calls `.generate()`."""
+    """Handle returned by :func:`load`. The server calls `.generate()`.
+
+    The Paint pipeline is optional: if it failed to import (e.g. because
+    `bpy` — Blender's Python API — couldn't be installed), we still
+    serve the Shape DiT's untextured mesh. For VID2SIM physics that is
+    sufficient; the downstream pipeline only relies on geometry.
+    """
 
     def __init__(self, shape_pipe, paint_pipe):
         self.shape_pipe = shape_pipe
-        self.paint_pipe = paint_pipe
+        self.paint_pipe = paint_pipe  # may be None
 
     def generate(self, rgb_bytes: bytes, mask_bytes: bytes) -> bytes:
         from PIL import Image
@@ -41,8 +47,13 @@ class _Hunyuan3DHandle:
             guidance_scale=5.0,
             octree_resolution=256,
         )[0]
-        # Paint 2.1: unwrap + PBR texture.
-        mesh = self.paint_pipe(mesh=mesh, image=rgb)
+        # Paint 2.1: unwrap + PBR texture — only if available.
+        if self.paint_pipe is not None:
+            try:
+                mesh = self.paint_pipe(mesh=mesh, image=rgb)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("paint pipeline failed at runtime (%s); "
+                               "returning untextured shape mesh", exc)
         buf = io.BytesIO()
         mesh.export(buf, file_type="glb")
         return buf.getvalue()
@@ -96,10 +107,13 @@ def load(weights_dir: Path) -> _Hunyuan3DHandle:
             break
         except Exception as exc:  # noqa: BLE001
             paint_errors.append(f"{mod_path}: {type(exc).__name__}: {exc}")
+    # Paint pipeline is optional — a missing `bpy` or a failed texture
+    # module does NOT block mesh generation. We serve the untextured
+    # shape mesh and log why.
     if Hunyuan3DPaintPipeline is None:
-        raise ImportError(
-            "could not import Hunyuan3DPaintPipeline; tried:\n  "
-            + "\n  ".join(paint_errors)
+        logger.warning(
+            "Hunyuan3D Paint pipeline unavailable — returning untextured "
+            "meshes. Attempts:\n  %s", "\n  ".join(paint_errors),
         )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -109,8 +123,17 @@ def load(weights_dir: Path) -> _Hunyuan3DHandle:
         _HF_REPO, subfolder="hunyuan3d-dit-v2-1", cache_dir=str(cache),
         torch_dtype=dtype,
     ).to(device)
-    paint_pipe = Hunyuan3DPaintPipeline.from_pretrained(
-        _HF_REPO, subfolder="hunyuan3d-paintpbr-v2-1", cache_dir=str(cache),
-    )
-    logger.info("hunyuan3d pipelines loaded on %s (%s)", device, dtype)
+
+    paint_pipe = None
+    if Hunyuan3DPaintPipeline is not None:
+        try:
+            paint_pipe = Hunyuan3DPaintPipeline.from_pretrained(
+                _HF_REPO, subfolder="hunyuan3d-paintpbr-v2-1", cache_dir=str(cache),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("paint pipeline weights load failed (%s); "
+                           "untextured meshes only", exc)
+
+    logger.info("hunyuan3d loaded on %s (%s); paint_pipe=%s",
+                device, dtype, "enabled" if paint_pipe else "disabled")
     return _Hunyuan3DHandle(shape_pipe, paint_pipe)

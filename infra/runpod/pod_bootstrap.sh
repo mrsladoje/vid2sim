@@ -90,16 +90,28 @@ if [ ! -d "$WEIGHTS_DIR/src/Hunyuan3D-2.1" ]; then
     git clone -q --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git \
         "$WEIGHTS_DIR/src/Hunyuan3D-2.1"
 fi
-python3 -m pip install -q -e "$WEIGHTS_DIR/src/Hunyuan3D-2.1" \
-    || log "  (Hunyuan3D package install warning ignored — importable at runtime)"
+# Install the runtime deps from each repo's requirements.txt.
+# We do NOT `pip install -e .` — neither repo ships a root setup.py; the
+# Python packages live in subdirs (hy3dshape/, hy3dpaint/, triposg/) and
+# are picked up via PYTHONPATH in step 6.
+if [ -f "$WEIGHTS_DIR/src/Hunyuan3D-2.1/requirements.txt" ]; then
+    python3 -m pip install -q -r "$WEIGHTS_DIR/src/Hunyuan3D-2.1/requirements.txt" \
+        || log "  (some hunyuan3d requirements did not pin cleanly — continuing)"
+fi
 
 # TripoSG 1.5B
 if [ ! -d "$WEIGHTS_DIR/src/TripoSG" ]; then
     git clone -q --depth 1 https://github.com/VAST-AI-Research/TripoSG.git \
         "$WEIGHTS_DIR/src/TripoSG"
 fi
-python3 -m pip install -q -e "$WEIGHTS_DIR/src/TripoSG" \
-    || log "  (TripoSG package install warning ignored)"
+if [ -f "$WEIGHTS_DIR/src/TripoSG/requirements.txt" ]; then
+    python3 -m pip install -q -r "$WEIGHTS_DIR/src/TripoSG/requirements.txt" \
+        || log "  (some triposg requirements did not pin cleanly — continuing)"
+fi
+
+# Make both source trees importable without needing setup.py by
+# prepending them to PYTHONPATH at server launch time (step 6).
+export POD_PYTHONPATH="$WEIGHTS_DIR/src/Hunyuan3D-2.1:$WEIGHTS_DIR/src/TripoSG"
 
 # -- 5. Pre-pull HF weights (eager, so first /mesh is warm) -------------------
 log "step 5/7  download weights (this is the slow step: 10–20 min)"
@@ -126,6 +138,7 @@ tmux new-session -d -s vid2sim \
     "cd $WORKSPACE && \
      HF_HOME=$HF_HOME \
      WEIGHTS_DIR=$WEIGHTS_DIR \
+     PYTHONPATH=\"${POD_PYTHONPATH:-}:\${PYTHONPATH:-}\" \
      VID2SIM_POD_INFERENCE=1 \
      uvicorn server:app --host 0.0.0.0 --port $PORT 2>&1 | tee -a $WORKSPACE/server.log"
 

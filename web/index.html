@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VID2SIM Viewer</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header>
+          <h1>VID2SIM</h1>
+          <div class="tagline">Polycam-for-physics · static browser viewer</div>
+        </header>
+
+        <section class="group">
+          <div class="group-title">Scene</div>
+          <div class="scene-buttons">
+            <button id="btn-load-example">Example fixture</button>
+            <button id="btn-load-stub">Stub scene</button>
+            <button id="btn-load-demo">Demo scene</button>
+          </div>
+          <div id="status" class="status-line">Loading…</div>
+        </section>
+
+        <section class="group">
+          <div class="group-title">Interaction mode</div>
+          <div class="mode-list">
+            <label class="mode-row">
+              <input type="radio" name="mode" value="select" checked />
+              <span><strong>Select</strong> <kbd>1</kbd><br /><small>click an object to inspect</small></span>
+            </label>
+            <label class="mode-row">
+              <input type="radio" name="mode" value="drag" />
+              <span><strong>Drag</strong> <kbd>2</kbd><br /><small>click + hold to move</small></span>
+            </label>
+            <label class="mode-row">
+              <input type="radio" name="mode" value="drop_ball" />
+              <span><strong>Drop Ball</strong> <kbd>3</kbd><br /><small>click to spawn a ball</small></span>
+            </label>
+            <label class="mode-row">
+              <input type="radio" name="mode" value="apply_force" />
+              <span><strong>Apply Force</strong> <kbd>4</kbd><br /><small>click + drag to push</small></span>
+            </label>
+          </div>
+          <div class="mode-active">Active: <span id="mode-label">Select</span></div>
+          <button id="btn-reset" class="reset-btn">Reset scene <kbd>R</kbd></button>
+        </section>
+
+        <section class="group">
+          <div class="group-title">Inspector</div>
+          <div id="info-empty" class="info-empty">
+            Nothing selected. Pick <strong>Select</strong> and click an object.
+          </div>
+          <div id="info-populated" class="info-populated" style="display: none">
+            <div class="field"><label>ID</label><span id="info-id">—</span></div>
+            <div class="field"><label>Class</label><span id="info-class">—</span></div>
+            <div class="field"><label>Mass</label><span id="info-mass">—</span></div>
+            <div class="field"><label>Friction (μ)</label><span id="info-friction">—</span></div>
+            <div class="field"><label>Restitution</label><span id="info-restitution">—</span></div>
+            <div class="field"><label>Material</label><span id="info-material">—</span></div>
+            <div class="field"><label>Mesh origin</label><span id="info-mesh-origin">—</span></div>
+            <div class="field"><label>Physics origin</label><span id="info-physics-origin">—</span></div>
+            <div class="field reasoning">
+              <label>VLM reasoning</label>
+              <span id="info-reasoning">—</span>
+            </div>
+          </div>
+        </section>
+
+        <footer>
+          <div id="fps" class="hud">0 fps</div>
+          <div id="body-count" class="hud">0 bodies</div>
+          <div class="copyright">
+            <a href="https://github.com/anthropics/vid2sim" target="_blank" rel="noreferrer">DragonHack 2026</a>
+            · Three.js + Rapier WASM
+          </div>
+        </footer>
+      </aside>
+
+      <main id="stage">
+        <canvas id="viewer"></canvas>
+        <div class="help-hud">
+          Right-drag orbit · wheel zoom · <kbd>1–4</kbd> mode · <kbd>R</kbd> reset
+        </div>
+      </main>
+    </div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

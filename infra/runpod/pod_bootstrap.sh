@@ -58,6 +58,23 @@ log "step 1/6  gpu probe"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \
     || die "no CUDA GPU visible — is this a GPU pod?"
 
+# -- 2a. Pin pip to pypi.org (some RunPod templates default to an aliyun
+#       mirror which is slow from EU/US regions). Persisted under
+#       /workspace so it survives restarts; also written to /root for
+#       the container's system pip.
+PIP_CONF_PERSISTED="$WORKSPACE/.pip/pip.conf"
+if [ ! -f "$PIP_CONF_PERSISTED" ]; then
+    mkdir -p "$WORKSPACE/.pip"
+    cat > "$PIP_CONF_PERSISTED" <<'PIPCONF'
+[global]
+index-url = https://pypi.org/simple/
+extra-index-url = https://download.pytorch.org/whl/cu124
+timeout = 120
+PIPCONF
+fi
+mkdir -p /root/.pip
+cp "$PIP_CONF_PERSISTED" /root/.pip/pip.conf
+
 # -- 2. APT deps (ephemeral; re-install every run, ~30s) ---------------------
 log "step 2/6  system deps (apt)"
 export DEBIAN_FRONTEND=noninteractive

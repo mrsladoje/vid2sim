@@ -60,6 +60,12 @@ class _TripoSGHandle:
         faces = np.ascontiguousarray(outputs[1])
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
+        # TripoSG's raw output regularly exceeds 200k faces (80+ MB
+        # glb) which blows up transfer time over the SSH tunnel.
+        # Decimate to the ADR-009 NFR cap (50k faces) here so the pod
+        # ships a ~3-5 MB payload.
+        mesh = _decimate_pymeshlab(mesh, max_faces=50_000)
+
         # Fast image-projection vertex coloring (~0.1 s). Gives a
         # coloured glb without needing bpy / Paint 2.1.
         _apply_image_projection_colors(mesh, img)
@@ -67,6 +73,38 @@ class _TripoSGHandle:
         buf = io.BytesIO()
         mesh.export(buf, file_type="glb")
         return buf.getvalue()
+
+
+def _decimate_pymeshlab(mesh, max_faces: int):
+    """Quadric-edge-collapse decimation via pymeshlab — same helper the
+    TripoSG reference script uses (scripts/inference_triposg.py::simplify_mesh).
+    Returns the original mesh unchanged if it's already under the cap.
+    """
+    import numpy as np
+    import trimesh
+
+    if len(mesh.faces) <= max_faces:
+        return mesh
+    try:
+        import pymeshlab
+        ms = pymeshlab.MeshSet()
+        ms.add_mesh(pymeshlab.Mesh(
+            vertex_matrix=np.asarray(mesh.vertices, dtype=np.float64),
+            face_matrix=np.asarray(mesh.faces, dtype=np.int32),
+        ))
+        ms.meshing_merge_close_vertices()
+        ms.meshing_decimation_quadric_edge_collapse(targetfacenum=max_faces)
+        pm = ms.current_mesh()
+        out = trimesh.Trimesh(
+            vertices=np.asarray(pm.vertex_matrix()),
+            faces=np.asarray(pm.face_matrix()),
+            process=False,
+        )
+        logger.info("decimated %d → %d faces", len(mesh.faces), len(out.faces))
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pymeshlab decimation failed (%s); returning original", exc)
+        return mesh
 
 
 def _apply_image_projection_colors(mesh, pil_image) -> None:

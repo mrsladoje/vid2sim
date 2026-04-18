@@ -1,0 +1,12 @@
+{
+  "session_id": "stub_01",
+  "device_serial": "mock_serial",
+  "firmware_version": "mock_fw",
+  "capture_fps": 15,
+  "frame_count": 150,
+  "class_prompts": [
+    "chair",
+    "table"
+  ],
+  "timebase_ns": 1776528828347582720
+}

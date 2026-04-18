@@ -1,0 +1,105 @@
+version: 1
+
+nodes:
+  - id: cam_rgb
+    type: ColorCamera
+    properties:
+      resolution: 1080p
+      fps: 15
+      interleaved: false
+      colorOrder: BGR
+
+  - id: cam_left
+    type: MonoCamera
+    properties:
+      resolution: 400p
+      boardSocket: LEFT
+      fps: 15
+
+  - id: cam_right
+    type: MonoCamera
+    properties:
+      resolution: 400p
+      boardSocket: RIGHT
+      fps: 15
+
+  - id: stereo
+    type: StereoDepth
+    properties:
+      depthAlign: cam_rgb
+      enableLENS: true
+      confidenceThreshold: 230
+      rectifyEdgeFillColor: 0
+
+  - id: yoloe
+    type: YoloDetectionNetwork
+    properties:
+      blobPath: "models/yoloe_26_open_vocab.blob"
+      confidenceThreshold: 0.5
+      classes: 80
+      coordinates: 4
+      anchors: []
+      anchorMasks: {}
+      iouThreshold: 0.5
+
+  - id: tracker
+    type: ObjectTracker
+    properties:
+      trackerType: ZERO_TERM_COLOR_HISTOGRAM
+      trackerIdAssignmentPolicy: UNIQUE_ID
+
+  - id: slc
+    type: SpatialLocationCalculator
+    properties:
+      waitForConfigInput: false
+
+  - id: imu
+    type: IMU
+    properties:
+      enableSensors: 
+        - ACCELEROMETER_RAW
+        - GYROSCOPE_RAW
+      sensorRate: 400
+
+  # Outputs
+  - id: out_rgb
+    type: XLinkOut
+    properties:
+      streamName: "rgb"
+  - id: out_depth
+    type: XLinkOut
+    properties:
+      streamName: "depth"
+  - id: out_track
+    type: XLinkOut
+    properties:
+      streamName: "track"
+  - id: out_imu
+    type: XLinkOut
+    properties:
+      streamName: "imu"
+
+connections:
+  - source: cam_rgb.video
+    target: yoloe.input
+  - source: cam_rgb.video
+    target: out_rgb.input
+  
+  - source: cam_left.out
+    target: stereo.left
+  - source: cam_right.out
+    target: stereo.right
+  - source: stereo.depth
+    target: slc.inputDepth
+  - source: stereo.depth
+    target: out_depth.input
+  
+  - source: yoloe.out
+    target: tracker.inputDetections
+  - source: cam_rgb.video
+    target: tracker.inputTrackerFrame
+  - source: tracker.out
+    target: out_track.input
+
+  - source: imu.out
+    target: out_imu.input

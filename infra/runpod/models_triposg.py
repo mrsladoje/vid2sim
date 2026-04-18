@@ -50,13 +50,20 @@ def load(weights_dir: Path) -> _TripoSGHandle:
     cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(weights_dir / "hf"))
 
-    # TripoSG ships either as a `diffusers`-style pipeline or a custom
-    # inference class. Try a few known module paths and surface ALL
-    # errors if none resolve, so the real missing dep is visible.
+    # TripoSG's own scripts use:
+    #   from triposg.pipelines.pipeline_triposg import TripoSGPipeline
+    #   pipe = TripoSGPipeline.from_pretrained(weights_dir).to(device, dtype)
+    # `.to()` takes two positional args (device, dtype) — different from
+    # the normal torch.nn.Module contract.
     errors: list[str] = []
     TripoSGPipeline = None
-    for mod_path in ("triposg.pipelines", "triposg.pipeline",
-                     "triposg", "triposg.inference"):
+    for mod_path in (
+        "triposg.pipelines.pipeline_triposg",
+        "triposg.pipelines",
+        "triposg.pipeline",
+        "triposg",
+        "triposg.inference",
+    ):
         try:
             mod = __import__(mod_path, fromlist=["TripoSGPipeline"])
             TripoSGPipeline = getattr(mod, "TripoSGPipeline")
@@ -73,8 +80,24 @@ def load(weights_dir: Path) -> _TripoSGHandle:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
 
-    pipe = TripoSGPipeline.from_pretrained(
-        _HF_REPO, cache_dir=str(cache), torch_dtype=dtype,
-    ).to(device)
-    logger.info("triposg pipeline loaded on %s (%s)", device, dtype)
+    # TripoSGPipeline.from_pretrained takes a weights directory, not a
+    # HF repo ID by default. Resolve via snapshot_download so we get a
+    # concrete local path under our persistent cache.
+    from huggingface_hub import snapshot_download
+
+    weights_path = snapshot_download(repo_id=_HF_REPO, cache_dir=str(cache))
+    logger.info("triposg weights at %s", weights_path)
+
+    pipe = TripoSGPipeline.from_pretrained(weights_path)
+    if pipe is None:
+        raise RuntimeError("TripoSGPipeline.from_pretrained returned None")
+    if hasattr(pipe, "to"):
+        # TripoSG uses a two-arg .to(device, dtype) — non-standard.
+        # Be defensive about the return value.
+        moved = pipe.to(device, dtype)
+        if moved is not None:
+            pipe = moved
+
+    logger.info("triposg pipeline loaded on %s (%s); type=%s",
+                device, dtype, type(pipe).__name__)
     return _TripoSGHandle(pipe)

@@ -40,9 +40,10 @@ jobs:
       - name: Lint
         run: ruff check src/reconstruction tests/reconstruction
 
-      - name: Test + coverage
+      - name: Test + coverage (80% gate on fusion + icp_align)
         run: |
           pytest tests/reconstruction -q \
-            --cov=src/reconstruction \
+            --cov=reconstruction.fusion \
+            --cov=reconstruction.icp_align \
             --cov-report=term-missing \
-            --cov-fail-under=0
+            --cov-fail-under=80

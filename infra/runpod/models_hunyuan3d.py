@@ -38,22 +38,33 @@ class _Hunyuan3DHandle:
     def generate(self, rgb_bytes: bytes, mask_bytes: bytes) -> bytes:
         from PIL import Image
 
+        # Hunyuan3D-2.1's shape DiT expects an RGBA image whose alpha
+        # channel is the object mask (see Hunyuan3D-2.1/demo.py line 26-28,
+        # hy3dshape/minimal_demo.py). Without alpha it treats the entire
+        # image as "object" and returns a near-cuboid. We already have a
+        # mask from our pipeline — use it as the alpha channel so we
+        # skip the slow `BackgroundRemover` model.
         rgb = Image.open(io.BytesIO(rgb_bytes)).convert("RGB")
         mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
-        # Shape DiT: image → untextured mesh (trimesh.Trimesh).
-        mesh = self.shape_pipe(
-            image=rgb, mask=mask,
-            num_inference_steps=30,
-            guidance_scale=5.0,
-            octree_resolution=256,
-        )[0]
+        if mask.size != rgb.size:
+            mask = mask.resize(rgb.size, Image.LANCZOS)
+        rgba = rgb.convert("RGBA")
+        rgba.putalpha(mask)
+
+        # The pipeline's __call__ takes just `image=` in the reference
+        # demos. Extra kwargs (num_inference_steps, octree_resolution,
+        # guidance_scale, mask=) are not part of the public API and get
+        # silently ignored. Stay minimal.
+        mesh = self.shape_pipe(image=rgba)[0]
+
         # Paint 2.1: unwrap + PBR texture — only if available.
         if self.paint_pipe is not None:
             try:
-                mesh = self.paint_pipe(mesh=mesh, image=rgb)
+                mesh = self.paint_pipe(mesh=mesh, image=rgba)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("paint pipeline failed at runtime (%s); "
                                "returning untextured shape mesh", exc)
+
         buf = io.BytesIO()
         mesh.export(buf, file_type="glb")
         return buf.getvalue()

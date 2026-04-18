@@ -113,20 +113,48 @@ fi
 # We do NOT `pip install -e .` — neither repo ships a root setup.py; the
 # Python packages live in subdirs (hy3dshape/, hy3dpaint/, triposg/) and
 # are picked up via PYTHONPATH in step 6.
-if [ -f "$WEIGHTS_DIR/src/Hunyuan3D-2.1/requirements.txt" ]; then
-    python3 -m pip install -q -r "$WEIGHTS_DIR/src/Hunyuan3D-2.1/requirements.txt" \
-        || log "  (some hunyuan3d requirements did not pin cleanly — continuing)"
-fi
+#
+# We also filter out a couple of problematic pins before installing so
+# pip doesn't abort the whole requirements file on an unsatisfiable
+# line:
+#   - bpy (Blender Python API) — wrong version pinned, and only needed
+#     for offline mesh baking, not inference.
+#   - diso — a torch-dependent C++ extension that fails under pip's
+#     build-isolation; install separately with --no-build-isolation
+#     once torch is on the path.
+_install_filtered_reqs () {
+    local reqs="$1"
+    [ -f "$reqs" ] || return 0
+    local tmp="$(mktemp)"
+    grep -vE '^(bpy|diso)([<>=! ]|$)' "$reqs" > "$tmp" || true
+    python3 -m pip install -q -r "$tmp" \
+        || log "  (some pins in $reqs did not resolve — continuing with what did)"
+    rm -f "$tmp"
+}
+
+_install_filtered_reqs "$WEIGHTS_DIR/src/Hunyuan3D-2.1/requirements.txt"
 
 # TripoSG 1.5B
 if [ ! -d "$WEIGHTS_DIR/src/TripoSG" ]; then
     git clone -q --depth 1 https://github.com/VAST-AI-Research/TripoSG.git \
         "$WEIGHTS_DIR/src/TripoSG"
 fi
-if [ -f "$WEIGHTS_DIR/src/TripoSG/requirements.txt" ]; then
-    python3 -m pip install -q -r "$WEIGHTS_DIR/src/TripoSG/requirements.txt" \
-        || log "  (some triposg requirements did not pin cleanly — continuing)"
-fi
+_install_filtered_reqs "$WEIGHTS_DIR/src/TripoSG/requirements.txt"
+
+# Pure-Python safety net: explicitly install deps that inference paths
+# import transitively but that may have been dropped if the
+# requirements.txt files above failed partway through. These are all
+# wheel-only (no C++ build), so they're cheap + deterministic.
+python3 -m pip install -q \
+    omegaconf einops rembg onnxruntime opencv-python-headless \
+    pymeshlab scikit-image pyyaml "pydantic>=2.6" \
+    || log "  (some pure-python fallback deps warn but installed)"
+
+# diso: build it against the torch we already installed. Must come
+# after torch is on the path. Failure here just means the Paint
+# pipeline may be degraded — Shape pipeline still runs.
+python3 -m pip install -q --no-build-isolation diso \
+    || log "  (diso build failed — continuing; Paint pipeline may fall back)"
 
 # Make both source trees importable without needing setup.py by
 # prepending them to PYTHONPATH at server launch time (step 6).

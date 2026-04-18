@@ -44,28 +44,15 @@ class _SF3DHandle:
         rgba = rgb.convert("RGBA")
         rgba.putalpha(mask)
 
-        # Run the SF3D pipeline. Bake at 1024 for sharp textures;
-        # target ~17.5k vertices ≈ ~35k faces (PRD NFR cap is 50k).
-        # Try several kwarg names because SF3D's signature has shifted
-        # across versions.
-        attempts = (
-            dict(bake_resolution=1024, remesh="triangle", vertex_count=17500),
-            dict(bake_resolution=1024, remesh="triangle", target_count=35000),
-            dict(bake_resolution=1024, remesh="none", vertex_count=17500),
-            dict(bake_resolution=1024, remesh="none"),
-            {},
-        )
-        last_exc = None
-        mesh = None
-        for kwargs in attempts:
-            try:
-                mesh, _glob = self.model.run_image(rgba, **kwargs)
-                break
-            except TypeError as exc:
-                last_exc = exc
-                continue
-        if mesh is None:
-            raise RuntimeError(f"SF3D run_image rejected every kwarg combo: {last_exc}")
+        # Run the SF3D pipeline. Reference invocation (from sf3d/demo.py):
+        #   trimesh_mesh, glob_dict = model.run_image(rgba, bake_resolution=1024)
+        try:
+            mesh, _glob = self.model.run_image(
+                rgba, bake_resolution=1024, remesh="none",
+            )
+        except TypeError:
+            # Older SF3D signature: run_image(image) only
+            mesh, _glob = self.model.run_image(rgba)
 
         buf = io.BytesIO()
         mesh.export(buf, file_type="glb")

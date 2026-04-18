@@ -37,6 +37,24 @@ log "weights:    $WEIGHTS_DIR"
 log "venv:       $VENV_DIR"
 log "port:       $PORT"
 
+# -- 0b. Persist library caches onto /workspace ------------------------------
+# Several model libraries (notably hy3dgen/hy3dshape) ignore cache_dir=
+# kwargs and write into /root/.cache/, which is ephemeral. Symlink them
+# into /workspace/cache/ so their internal downloads persist across pod
+# restarts. Idempotent — safe to rerun.
+mkdir -p "$WORKSPACE/cache" /root/.cache
+for libdir in hy3dgen huggingface torch; do
+    target="$WORKSPACE/cache/$libdir"
+    link="/root/.cache/$libdir"
+    mkdir -p "$target"
+    if [ -d "$link" ] && [ ! -L "$link" ]; then
+        # Existing real dir — migrate its contents to /workspace once
+        cp -an "$link"/. "$target"/ 2>/dev/null || true
+        rm -rf "$link"
+    fi
+    ln -sfn "$target" "$link"
+done
+
 # -- 0. Persist the authorized key across pod restarts ----------------------
 # RunPod pod restarts wipe the container filesystem (including
 # /root/.ssh/authorized_keys) but preserve /workspace/. We store the

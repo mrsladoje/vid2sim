@@ -143,6 +143,10 @@ if [ ! -f "$VENV_STAMP" ]; then
         git clone -q --depth 1 https://github.com/VAST-AI-Research/TripoSG.git \
             "$WEIGHTS_DIR/src/TripoSG"
     fi
+    if [ ! -d "$WEIGHTS_DIR/src/stable-fast-3d" ]; then
+        git clone -q --depth 1 https://github.com/Stability-AI/stable-fast-3d.git \
+            "$WEIGHTS_DIR/src/stable-fast-3d"
+    fi
 
     # Install each repo's requirements.txt, filtering out pins that abort
     # pip (bpy==4.0 not available on PyPI for py3.11; diso needs no-build
@@ -158,6 +162,7 @@ if [ ! -f "$VENV_STAMP" ]; then
     }
     _install_filtered_reqs "$WEIGHTS_DIR/src/Hunyuan3D-2.1/requirements.txt"
     _install_filtered_reqs "$WEIGHTS_DIR/src/TripoSG/requirements.txt"
+    _install_filtered_reqs "$WEIGHTS_DIR/src/stable-fast-3d/requirements.txt"
 
     # Pure-Python safety net for deps the model code imports transitively
     # but that may have been dropped if requirements.txt install aborted.
@@ -206,7 +211,8 @@ fi
 
 # Compute PYTHONPATH for the nested Hunyuan3D packages + TripoSG.
 HY3D_ROOT="$WEIGHTS_DIR/src/Hunyuan3D-2.1"
-POD_PYTHONPATH="$HY3D_ROOT/hy3dshape:$HY3D_ROOT/hy3dpaint:$HY3D_ROOT:$WEIGHTS_DIR/src/TripoSG"
+SF3D_ROOT="$WEIGHTS_DIR/src/stable-fast-3d"
+POD_PYTHONPATH="$HY3D_ROOT/hy3dshape:$HY3D_ROOT/hy3dpaint:$HY3D_ROOT:$WEIGHTS_DIR/src/TripoSG:$SF3D_ROOT"
 
 # -- 5. Pre-pull HF weights (cached — skipped on restart) --------------------
 log "step 5/6  download weights (skipped if cached)"
@@ -216,7 +222,8 @@ mkdir -p "$HF_HOME"
 import os
 from huggingface_hub import snapshot_download
 os.environ["HF_HOME"] = os.environ.get("HF_HOME", "$WEIGHTS_DIR/hf")
-for repo in ("tencent/Hunyuan3D-2.1", "VAST-AI/TripoSG"):
+for repo in ("tencent/Hunyuan3D-2.1", "VAST-AI/TripoSG",
+             "stabilityai/stable-fast-3d"):
     print(f"  pulling {repo} ...", flush=True)
     snapshot_download(repo_id=repo, cache_dir=os.environ["HF_HOME"],
                       tqdm_class=None)

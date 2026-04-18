@@ -36,7 +36,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 WEIGHTS_DIR = Path(os.environ.get("WEIGHTS_DIR", "/workspace/weights"))
 ENABLE_INFERENCE = os.environ.get("VID2SIM_POD_INFERENCE", "1") == "1"
-ALLOWED_MODELS = {"hunyuan3d", "triposg"}
+ALLOWED_MODELS = {"hunyuan3d", "triposg", "sf3d"}
 
 app = FastAPI(title="VID2SIM mesh-gen", version="1.0")
 
@@ -61,6 +61,8 @@ def _load_model(model: str) -> object:
         from models_hunyuan3d import load as _load  # type: ignore
     elif model == "triposg":
         from models_triposg import load as _load  # type: ignore
+    elif model == "sf3d":
+        from models_sf3d import load as _load  # type: ignore
     else:  # pragma: no cover - validated upstream
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
     handle = _load(WEIGHTS_DIR)

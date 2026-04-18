@@ -8,8 +8,8 @@ This directory holds the Architecture Decision Records (ADRs) for the VID2SIM ha
 | --- | --------------------------------------------------------------------- | -------- | ---------- | ----------------------------- |
 | 001 | [Custom JSON scene spec as source of truth](ADR-001-scene-spec-source-of-truth.md) | Accepted | 2026-04-18 | Data model / interchange      |
 | 002 | [Hybrid stereo + monocular depth fusion](ADR-002-hybrid-depth-fusion.md)           | Accepted | 2026-04-18 | Perception (Stage A)          |
-| 003 | [Hunyuan3D 2.1 for geometry completion, SF3D fallback](ADR-003-image-to-3d-diffusion.md) | Accepted | 2026-04-18 | Geometry completion (Stage B) |
-| 004 | [Split physics engines (Rapier browser, PyBullet export)](ADR-004-dual-physics-engine.md) | Accepted | 2026-04-18 | Physics runtime (Stage D)     |
+| 003 | [Hunyuan3D 2.1 for geometry completion, TripoSG 1.5B fallback](ADR-003-image-to-3d-diffusion.md) | Accepted | 2026-04-18 | Geometry completion (Stage B) |
+| 004 | [Split physics engines (Rapier browser, MuJoCo export)](ADR-004-dual-physics-engine.md) | Accepted | 2026-04-18 | Physics runtime (Stage D)     |
 | 005 | [VLM-inferred physics properties with lookup fallback](ADR-005-vlm-physics-inference.md) | Accepted | 2026-04-18 | Physics inference (Stage C)   |
 | 006 | [Browser-native viewer, no backend](ADR-006-browser-native-viewer.md)              | Accepted | 2026-04-18 | Demo delivery                 |
 | 007 | [Compute split — edge NPU for perception, M3 Max for offline](ADR-007-compute-split.md) | Accepted | 2026-04-18 | Compute placement             |
@@ -21,10 +21,10 @@ This directory holds the Architecture Decision Records (ADRs) for the VID2SIM ha
 flowchart TD
     ADR007[ADR-007<br/>Compute split<br/>edge NPU + M3 Max]
     ADR002[ADR-002<br/>Hybrid depth fusion<br/>stereo + DA3]
-    ADR003[ADR-003<br/>Image-to-3D diffusion<br/>Hunyuan3D + SF3D]
+    ADR003[ADR-003<br/>Image-to-3D diffusion<br/>Hunyuan3D + TripoSG]
     ADR005[ADR-005<br/>VLM physics inference<br/>Opus + lookup fallback]
     ADR001[ADR-001<br/>scene.json<br/>source of truth]
-    ADR004[ADR-004<br/>Dual physics engines<br/>Rapier + PyBullet]
+    ADR004[ADR-004<br/>Dual physics engines<br/>Rapier + MuJoCo]
     ADR006[ADR-006<br/>Browser-native viewer<br/>Three.js + Rapier WASM]
     ADR008[ADR-008<br/>Scope exclusions<br/>no splats/Isaac/Genesis]
 

@@ -7,7 +7,7 @@
 
 ## Context
 
-VID2SIM produces an interactive physics simulation from a short RGB-D capture, and the same reconstructed scene must flow to multiple downstream consumers: a Three.js + Rapier WASM browser viewer, a PyBullet headless runner, MJCF for MuJoCo, and — as a stretch — USD for Omniverse-style tooling (PRD §3 goals 4, §9, §10).
+VID2SIM produces an interactive physics simulation from a short RGB-D capture, and the same reconstructed scene must flow to multiple downstream consumers: a Three.js + Rapier WASM browser viewer, a MuJoCo headless runner (with optional PyBullet as transitional fallback per ADR-004), and — as a stretch — USD for Omniverse-style tooling (PRD §3 goals 4, §9, §10).
 
 Picking one simulator's native format as the authoritative representation would couple the whole pipeline to that simulator's quirks. We need a representation that: (a) is stable to iterate on during the 24h build, (b) is trivial to unit-test with fixtures, and (c) can be fanned out to every required target without forcing a rewrite of the perception stages.
 
@@ -15,7 +15,7 @@ Picking one simulator's native format as the authoritative representation would 
 
 Use a custom typed `scene.json` (JSON Schema draft 2020-12) as the single source of truth for a reconstructed scene. The schema owns geometry references, per-object transforms, collider definitions, physics properties (mass, friction, restitution, material class), and provenance metadata.
 
-All simulator-specific formats — glTF (Three.js/Rapier), MJCF (MuJoCo), USD (Omniverse), PyBullet `.py` — are **exporters** that read `scene.json` and emit their target format. The primary representation is never a simulator-native file.
+All simulator-specific formats — glTF (Three.js/Rapier), MJCF (MuJoCo), USD (Omniverse), and optional PyBullet `.py` — are **exporters** that read `scene.json` and emit their target format. The primary representation is never a simulator-native file.
 
 ## Alternatives Considered
 
@@ -29,10 +29,10 @@ All simulator-specific formats — glTF (Three.js/Rapier), MJCF (MuJoCo), USD (O
 - Fast to iterate on: the schema is a plain JSON file, so every stage (perception, completion, VLM, assembly) can be tested against handwritten fixtures.
 - Simple regression testing: golden `scene.json` files can be diffed in CI.
 - Clean separation of concerns: every downstream simulator gets a dedicated exporter that is independently testable.
-- Supports the browser-first demo (ADR-006) and the PyBullet export path (ADR-004) from a single representation.
+- Supports the browser-first demo (ADR-006) and the MuJoCo export path (ADR-004) from a single representation.
 
 **Negative**
-- We carry export code for each target (glTF, MJCF, USD, PyBullet) instead of inheriting converters from an ecosystem.
+- We carry export code for each target (glTF, MJCF, USD, and optional PyBullet) instead of inheriting converters from an ecosystem.
 - We do not get USD's composition, layering, or referencing features "for free"; if we ever need them, they must be added to the schema or the USD exporter.
 
 **Neutral**

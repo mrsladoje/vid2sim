@@ -94,7 +94,13 @@ def load(weights_dir: Path) -> _SF3DHandle:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
 
-    model = SF3D.from_pretrained(_HF_REPO)
+    # SF3D's from_pretrained requires explicit config + weight names.
+    # Standard names per stabilityai/stable-fast-3d HF repo.
+    model = SF3D.from_pretrained(
+        _HF_REPO,
+        config_name="config.yaml",
+        weight_name="model.safetensors",
+    )
     if model is None:
         raise RuntimeError("SF3D.from_pretrained returned None")
     if hasattr(model, "to"):

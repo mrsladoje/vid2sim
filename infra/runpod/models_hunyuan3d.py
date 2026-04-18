@@ -39,17 +39,27 @@ class _Hunyuan3DHandle:
         from PIL import Image
 
         # Hunyuan3D-2.1's shape DiT expects an RGBA image whose alpha
-        # channel is the object mask (see Hunyuan3D-2.1/demo.py line 26-28,
-        # hy3dshape/minimal_demo.py). Without alpha it treats the entire
-        # image as "object" and returns a near-cuboid. We already have a
-        # mask from our pipeline — use it as the alpha channel so we
-        # skip the slow `BackgroundRemover` model.
-        rgb = Image.open(io.BytesIO(rgb_bytes)).convert("RGB")
-        mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
-        if mask.size != rgb.size:
-            mask = mask.resize(rgb.size, Image.LANCZOS)
-        rgba = rgb.convert("RGBA")
-        rgba.putalpha(mask)
+        # channel is the object mask. If the source image already has
+        # a real alpha channel (e.g. demo.png ships RGBA with correct
+        # object cutout), use that — it beats any mask we might layer
+        # on top. Otherwise, fall back to the mask the caller provided.
+        src = Image.open(io.BytesIO(rgb_bytes))
+        has_real_alpha = False
+        if src.mode == "RGBA":
+            a = src.split()[3]
+            # "real" = non-trivial alpha, i.e. not every pixel fully
+            # opaque. A uniform 255 alpha carries no information.
+            mn, mx = a.getextrema()
+            has_real_alpha = not (mn == mx == 255)
+
+        if has_real_alpha:
+            rgba = src.convert("RGBA")
+        else:
+            rgba = src.convert("RGB").convert("RGBA")
+            mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
+            if mask.size != rgba.size:
+                mask = mask.resize(rgba.size, Image.LANCZOS)
+            rgba.putalpha(mask)
 
         # The pipeline's __call__ takes just `image=` in the reference
         # demos. Extra kwargs (num_inference_steps, octree_resolution,

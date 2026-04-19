@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Scene data is symlinked from ../data/reconstructed/* at dev time.
+public/scenes/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

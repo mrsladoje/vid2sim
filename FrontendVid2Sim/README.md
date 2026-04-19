@@ -1,3 +1,59 @@
+# FrontendVid2Sim
+
+Browser-native viewer for the Vid2Sim pipeline (Three.js + Rapier WASM).
+
+## Scripts
+
+| Command | What it does |
+|---|---|
+| `npm install` | Install dependencies (first time only). |
+| `npm run dev` | Vite dev server with HMR. |
+| `npm run build` | Type-check + production bundle to `dist/`. |
+| `npm run typecheck` | `tsc -b --noEmit`. |
+| `npm test` | Vitest unit tests. |
+
+## Serving reconstructed scenes
+
+The viewer resolves its scene source in three tiers, with automatic fallback:
+
+1. **Stream 03 assembled** — `/scenes/rec_01_sf3d_assembled/scene.json`
+   (per-object `meshes/<id>.glb` + CoACD hulls + authored physics)
+2. **Stream 02 reconstructed** — `/scenes/rec_01_sf3d/reconstructed.json`
+   (per-object raw SF3D GLBs + world-frame placement only)
+3. **Synthetic demo** — built-in, badged as "demo data" in the viewer corner
+
+Because `data/` lives outside `FrontendVid2Sim/`, symlink the bundles into
+`public/` so Vite serves them:
+
+```bash
+# from FrontendVid2Sim/
+mkdir -p public/scenes
+ln -sfn ../../../data/scenes/rec_01_sf3d         public/scenes/rec_01_sf3d_assembled
+ln -sfn ../../../data/reconstructed/rec_01_sf3d  public/scenes/rec_01_sf3d
+```
+
+`public/scenes/` is in `.gitignore` — don't commit the bundle into the frontend
+tree.
+
+### Why we avoid `scene.glb`
+
+Stream 03 emits a composed `scene.glb` as a convenience artifact. The viewer
+deliberately **does not** load it — loading one monolithic glTF would produce
+one `Object3D` tree, and Rapier would weld every object into a single rigid
+body. Instead, `SceneJsonSource` walks `scene.json` and loads each
+`meshes/<id>.glb` separately, giving one `Object3D` + one rigid body per
+object. Per-object picking, dragging, and impulse all work because each root
+is tagged with `userData.objectId`.
+
+## Adding a new scene source
+
+`src/simulation/types.ts` exports the `SceneSource` interface. Drop a new
+implementation next to `reconstructedSource.ts` (e.g. `sceneJsonSource.ts` for
+Stream 03's `scene.gltf`) and `SimulationViewer.tsx` can select it without
+touching `viewer.ts` or `physics.ts`.
+
+---
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.

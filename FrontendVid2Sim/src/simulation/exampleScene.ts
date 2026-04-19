@@ -1,4 +1,13 @@
-import type { SceneSpec } from "./types";
+import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import type {
+  LoadedMesh,
+  LoadedScene,
+  SceneObject,
+  SceneSource,
+  SceneSpec,
+} from "./types";
+import { buildPrimitiveMesh } from "./primitives";
 
 export const EXAMPLE_SCENE: SceneSpec = {
   version: "1.0",
@@ -127,3 +136,96 @@ export const EXAMPLE_SCENE: SceneSpec = {
     },
   ],
 };
+
+/**
+ * Wraps the hand-crafted demo scene as a SceneSource. Primitive meshes are
+ * built inline; any "mesh:<url>" entries would fall through to GLTFLoader.
+ */
+export class ExampleSceneSource implements SceneSource {
+  readonly kind = "demo" as const;
+  readonly displayName = "Demo scene";
+  private readonly spec: SceneSpec;
+  private readonly isFallback: boolean;
+
+  constructor(spec: SceneSpec = EXAMPLE_SCENE, isFallback = false) {
+    this.spec = spec;
+    this.isFallback = isFallback;
+  }
+
+  async load(): Promise<LoadedScene> {
+    const meshes: LoadedMesh[] = [];
+    for (const obj of this.spec.objects) {
+      const root = await buildMeshForSpec(obj);
+      const t = obj.transform.translation;
+      const q = obj.transform.rotation_quat;
+      root.position.set(t[0], t[1], t[2]);
+      root.quaternion.set(q[0], q[1], q[2], q[3]);
+      if (obj.transform.scale !== 1.0) root.scale.setScalar(obj.transform.scale);
+      tagWithId(root, obj.id);
+
+      const bbox = new THREE.Box3().setFromObject(root);
+
+      meshes.push({
+        id: obj.id,
+        object3d: root,
+        label: prettyLabel(obj.class),
+        classification: obj.class,
+        bboxWorld: bbox,
+        meshOrigin: obj.source?.mesh_origin ?? "primitive",
+        physics: {
+          isRigid: obj.physics.is_rigid,
+          massKg: obj.physics.mass_kg,
+          friction: obj.physics.friction,
+          restitution: obj.physics.restitution,
+        },
+        legacySpec: obj,
+      });
+    }
+
+    return {
+      displayName: this.displayName,
+      meshes,
+      groundY: 0,
+      gravityY: this.spec.world.gravity[1],
+      groundMaterial: this.spec.ground.material,
+      cameraHint: this.spec.camera_pose && {
+        position: this.spec.camera_pose.translation,
+        target: [0, 0.4, 0],
+      },
+      isFallback: this.isFallback,
+    };
+  }
+}
+
+async function buildMeshForSpec(obj: SceneObject): Promise<THREE.Object3D> {
+  if (obj.mesh.startsWith("primitive:")) return buildPrimitiveMesh(obj);
+  try {
+    const loader = new GLTFLoader();
+    const gltf = await loader.loadAsync(obj.mesh);
+    const root = gltf.scene ?? gltf.scenes?.[0];
+    if (!root) throw new Error(`glTF at ${obj.mesh} has no scene`);
+    root.traverse((c) => {
+      const mesh = c as THREE.Mesh;
+      if (mesh.isMesh) {
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+      }
+    });
+    return root;
+  } catch (e) {
+    console.warn(`mesh ${obj.mesh} failed to load; falling back to primitive`, e);
+    return buildPrimitiveMesh({ ...obj, mesh: `primitive:${obj.collider.shape}` });
+  }
+}
+
+function tagWithId(root: THREE.Object3D, id: string) {
+  root.userData.objectId = id;
+  root.traverse((c) => {
+    c.userData.objectId = id;
+  });
+}
+
+function prettyLabel(cls: string): string {
+  if (!cls) return "Object";
+  return cls.charAt(0).toUpperCase() + cls.slice(1);
+}

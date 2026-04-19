@@ -30,7 +30,8 @@ def fake_session(tmp_path: Path) -> Path:
     (session / "meshes").mkdir(parents=True)
     (session / "crops").mkdir()
 
-    cube = trimesh.creation.box(extents=[0.5, 0.5, 0.5])
+    # book-sized box: 16×2.5×22 cm, sits inside the scale-clamp range for "book"
+    cube = trimesh.creation.box(extents=[0.16, 0.025, 0.22])
     cube.export(session / "meshes" / "box_01.glb")
     ball = trimesh.creation.icosphere(subdivisions=2, radius=0.12)
     ball.export(session / "meshes" / "ball_01.glb")
@@ -48,13 +49,13 @@ def fake_session(tmp_path: Path) -> Path:
                 "mesh_path": "meshes/box_01.glb",
                 "crop_image_path": "crops/box_01.png",
                 "mesh_origin": "hunyuan3d_2.1",
-                "center": [0.0, 0.25, 0.0],
+                "center": [0.0, 0.0125, 0.0],
                 "rotation_quat": [0, 0, 0, 1],
-                "bbox_min": [-0.25, 0.0, -0.25],
-                "bbox_max": [0.25, 0.5, 0.25],
+                "bbox_min": [-0.08, 0.0, -0.11],
+                "bbox_max": [0.08, 0.025, 0.11],
                 "lowest_points": [
-                    [-0.25, 0.0, -0.25], [0.25, 0.0, -0.25],
-                    [0.25, 0.0, 0.25], [-0.25, 0.0, 0.25],
+                    [-0.08, 0.0, -0.11], [0.08, 0.0, -0.11],
+                    [0.08, 0.0, 0.11], [-0.08, 0.0, 0.11],
                 ],
             },
             {

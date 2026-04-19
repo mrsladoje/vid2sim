@@ -14,7 +14,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import lookup, schema, vlm
+from . import lookup, schema, scale_clamp, vlm
 from .decomp import DecompConfig, decompose
 from .ground import GroundEstimate, estimate_ground
 from .reconstructed import ReconstructedObject, load_session
@@ -45,15 +45,19 @@ class SceneAssembler:
     # ---- public ----------------------------------------------------------
 
     def assemble(self, session_dir: Path, out_dir: Path) -> dict:
-        objects = load_session(session_dir)
+        raw_objects = load_session(session_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "meshes").mkdir(exist_ok=True)
         (out_dir / "hulls").mkdir(exist_ok=True)
 
+        # Run scale-clamp first so ground fit sees corrected bboxes.
+        clamps = [scale_clamp.clamp_object_scale(o) for o in raw_objects]
+        objects = [c.obj for c in clamps]
+
         ground = estimate_ground(objects, up_axis=self.config.up_axis)
         scene_objects = [
-            self._build_object(obj, session_dir, out_dir)
-            for obj in objects
+            self._build_object(obj, clamp, session_dir, out_dir)
+            for obj, clamp in zip(objects, clamps)
         ]
 
         scene = {
@@ -84,10 +88,11 @@ class SceneAssembler:
     def _build_object(
         self,
         obj: ReconstructedObject,
+        clamp: scale_clamp.ClampResult,
         session_dir: Path,
         out_dir: Path,
     ) -> dict:
-        mesh_rel = self._stage_mesh(obj, session_dir, out_dir)
+        mesh_rel = self._stage_mesh(obj, session_dir, out_dir, mesh_scale=clamp.scale)
         collider = self._build_collider(obj, session_dir, out_dir)
         physics_block, material_class, source_block = self._physics(obj, session_dir)
 
@@ -106,10 +111,17 @@ class SceneAssembler:
             "source": source_block,
         }
 
-    def _stage_mesh(self, obj, session_dir: Path, out_dir: Path) -> str:
+    def _stage_mesh(self, obj, session_dir: Path, out_dir: Path,
+                    mesh_scale: float = 1.0) -> str:
         src = session_dir / obj.mesh_path
         dst = out_dir / "meshes" / f"{obj.id}.glb"
-        shutil.copy2(src, dst)
+        if mesh_scale == 1.0:
+            shutil.copy2(src, dst)
+        else:
+            import trimesh
+            mesh = trimesh.load(src, force="mesh")
+            mesh.apply_scale(mesh_scale)
+            mesh.export(dst)
         return f"meshes/{obj.id}.glb"
 
     def _build_collider(self, obj, session_dir: Path, out_dir: Path) -> dict:
@@ -120,9 +132,10 @@ class SceneAssembler:
 
         is_dynamic = obj.class_name in self.config.dynamic_classes
         if is_dynamic and self.config.decompose_dynamic:
+            staged_mesh = out_dir / "meshes" / f"{obj.id}.glb"
             try:
                 hull_paths = decompose(
-                    session_dir / obj.mesh_path,
+                    staged_mesh,
                     out_dir / "hulls",
                     self.config.decomp,
                 )

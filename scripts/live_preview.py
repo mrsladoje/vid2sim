@@ -56,11 +56,11 @@ def colourise_depth(depth_mm: np.ndarray, max_mm: int = 4000) -> np.ndarray:
 def main() -> int:
     ap = argparse.ArgumentParser(__doc__)
     ap.add_argument(
-        "--rgb-size", default="4k",
+        "--rgb-size", default="1080p",
         help="RGB resolution: '4k' (3840x2160), '1080p' (1920x1080), '720p' (1280x720), or 'WxH'",
     )
-    ap.add_argument("--rgb-fps", type=int, default=5,
-                    help="RGB fps — low default because 4K over USB 2 is bandwidth-bound")
+    ap.add_argument("--rgb-fps", type=int, default=10,
+                    help="RGB fps — matches the capture pipeline budget over the current cable scaffolding")
     ap.add_argument("--stereo-fps", type=int, default=15,
                     help="Mono + depth fps — independent of RGB fps")
     ap.add_argument("--max-depth-mm", type=int, default=4000)

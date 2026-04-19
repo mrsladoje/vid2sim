@@ -28,7 +28,7 @@ Creating simulatable digital twins of real environments is either **💸 expensi
 
 ## 🎥 See It In Action (YT▶️ link)
 
-[![HundDB Demo](https://img.youtube.com/vi/vx_4TTkmaxA/maxresdefault.jpg)](https://www.youtube.com/watch?v=vx_4TTkmaxA)
+[![HundDB Demo](https://img.youtube.com/vi/7ID7KJoDnME/maxresdefault.jpg)](https://www.youtube.com/watch?v=7ID7KJoDnME)
 
 *Click on the image above to watch the full demo!*
 

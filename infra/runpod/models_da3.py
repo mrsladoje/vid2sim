@@ -50,15 +50,25 @@ class _DA3Handle:
         rgb = Image.open(io.BytesIO(rgb_bytes)).convert("RGB")
         orig_size = rgb.size  # (W, H)
 
-        inputs = self.processor(images=rgb, return_tensors="pt").to(
-            self.device, dtype=self.dtype
-        )
+        # Important: keep inputs fp32. Some Depth Anything fp16 weights
+        # underflow on fp16 inputs and emit all-zero depth. Use autocast
+        # for the forward pass instead — that gives us fp16 perf without
+        # the input-cast pitfall.
+        inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)
+        amp_enabled = (self.device == "cuda" and self.dtype == torch.float16)
         with torch.no_grad():
-            outputs = self.model(**inputs)
-        depth = outputs.predicted_depth  # (1, H, W)
+            if amp_enabled:
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    outputs = self.model(**inputs)
+            else:
+                outputs = self.model(**inputs)
+        depth = outputs.predicted_depth  # (1, H, W) or (1, 1, H, W)
         if depth.dim() == 4:
             depth = depth.squeeze(1)
         depth = depth.squeeze(0).float().cpu().numpy().astype(np.float32)
+
+        logger.info("DA3 raw depth range: %.4f .. %.4f (shape %s)",
+                    float(depth.min()), float(depth.max()), depth.shape)
 
         # Resize back to the input resolution (HF processors normally
         # downsample to ~518 on the long edge).
@@ -88,12 +98,16 @@ def load(weights_dir: Path) -> _DA3Handle:
         try:
             logger.info("trying DA3 repo: %s", repo)
             processor = AutoImageProcessor.from_pretrained(repo, cache_dir=str(cache))
+            # Load weights in fp32 so we don't trip a known underflow in
+            # the metric-large checkpoint when the model is held in fp16
+            # AND the input is also fp16. Autocast in `predict()` still
+            # gives us fp16 throughput on the forward pass.
             model = AutoModelForDepthEstimation.from_pretrained(
-                repo, cache_dir=str(cache), torch_dtype=dtype,
+                repo, cache_dir=str(cache),
             )
             model = model.to(device)
             model.eval()
-            logger.info("DA3 loaded from %s on %s (%s)", repo, device, dtype)
+            logger.info("DA3 loaded from %s on %s (autocast=%s)", repo, device, dtype)
             return _DA3Handle(processor, model, device=device, dtype=dtype,
                               repo_id=repo)
         except Exception as exc:  # noqa: BLE001

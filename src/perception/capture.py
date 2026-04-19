@@ -306,16 +306,38 @@ def _process_seg_detections(
 ) -> list[ObjectRecord]:
     """Fill mask_cls / mask_trk from an ImgDetectionsExtended message.
 
-    Per-instance binary masks come back at the model's processing
-    resolution (e.g. 512x288). We upsample each one to the full RGB
-    resolution and stamp class index + track id where the mask is true.
+    In depthai-nodes >= 0.4, `ImgDetectionsExtended.masks` is a single
+    2D int16 semantic map at the network's processing resolution (e.g.
+    288x512), where every pixel stores the detection-index that owns
+    it (or -1 for background). We nearest-neighbour upsample that map
+    once to full RGB resolution, then for each detection index take the
+    corresponding binary slice and stamp class + track id into the
+    bundle's mask_class / mask_track planes.
+
+    Falls back to bbox-rectangle blits only if the message genuinely
+    didn't ship a semantic map (older firmware, non-seg head, etc.).
     """
     objects: list[ObjectRecord] = []
     detections = list(getattr(det_msg, "detections", []) or [])
-    # `masks` is a single (N, h, w) numpy array per the depthai_nodes
-    # ImgDetectionsExtended schema. Some firmware versions expose
-    # `det.mask` per detection instead — handle both.
-    masks_array = getattr(det_msg, "masks", None)
+    semantic_raw = getattr(det_msg, "masks", None)
+
+    # Normalise to a 2D int map at RGB resolution (or None if unavailable).
+    semantic_full: Optional[np.ndarray] = None
+    if semantic_raw is not None:
+        arr = np.asarray(semantic_raw)
+        if arr.ndim == 2 and arr.size > 0:
+            if arr.shape != (RGB_HEIGHT, RGB_WIDTH):
+                # _nn_resize_u8 only preserves uint8 values (0-255).
+                # Detection indices beyond 254 are vanishingly rare for
+                # our whitelist but clamp defensively; background stays
+                # as -1 -> 255 after the cast round-trip, which we then
+                # rescore below.
+                clamped = np.where(arr < 0, 255, arr).astype(np.uint8)
+                resized = _nn_resize_u8(clamped, RGB_WIDTH, RGB_HEIGHT)
+                semantic_full = np.where(resized == 255, -1, resized).astype(np.int16)
+            else:
+                semantic_full = arr.astype(np.int16)
+
     for det_idx, det in enumerate(detections):
         cls_idx = int(getattr(det, "label", -1))
         if 0 <= cls_idx < len(COCO_80_CLASSES):
@@ -324,27 +346,39 @@ def _process_seg_detections(
             cls_name = "unknown"
         if cls_name not in allowed_classes:
             continue
-        # Extract this detection's binary mask.
-        binary: Optional[np.ndarray] = None
+
+        track_id = len(objects) + 1
+        full_binary: Optional[np.ndarray] = None
+
+        # Prefer the per-detection binary mask if this depthai-nodes
+        # version exposes one on the detection itself.
         per_det_mask = getattr(det, "mask", None)
         if per_det_mask is not None:
-            binary = np.asarray(per_det_mask)
-        elif masks_array is not None and det_idx < len(masks_array):
-            binary = np.asarray(masks_array[det_idx])
-        if binary is None or binary.size == 0:
-            # Fall back to bbox rectangle if the mask isn't available.
+            per = np.asarray(per_det_mask)
+            if per.ndim == 2 and per.size > 0:
+                full_binary = _resize_mask_to_rgb(per > 0)
+
+        # Otherwise carve the instance out of the shared semantic map.
+        if full_binary is None and semantic_full is not None:
+            full_binary = semantic_full == det_idx
+
+        if full_binary is not None and full_binary.any():
+            mask_cls[full_binary] = cls_idx + 1
+            mask_trk[full_binary] = track_id
+        else:
+            # Last-resort fallback — bbox rectangle. Logged so we notice
+            # if we're silently regressing to bbox masks in production.
+            logger.warning(
+                "seg mask unavailable for det %d (%s); falling back to bbox",
+                det_idx, cls_name,
+            )
             x1 = int(det.xmin * RGB_WIDTH)
             y1 = int(det.ymin * RGB_HEIGHT)
             x2 = int(det.xmax * RGB_WIDTH)
             y2 = int(det.ymax * RGB_HEIGHT)
-            track_id = len(objects) + 1
             mask_cls[y1:y2, x1:x2] = cls_idx + 1
             mask_trk[y1:y2, x1:x2] = track_id
-        else:
-            full = _resize_mask_to_rgb(binary > 0)
-            track_id = len(objects) + 1
-            mask_cls[full > 0] = cls_idx + 1
-            mask_trk[full > 0] = track_id
+
         x1 = int(det.xmin * RGB_WIDTH)
         y1 = int(det.ymin * RGB_HEIGHT)
         x2 = int(det.xmax * RGB_WIDTH)
@@ -450,19 +484,58 @@ def run_capture(args: argparse.Namespace) -> int:
 
         writer = BundleWriter(outdir, manifest, intrinsics)
 
-        logger.info("Capturing %.1fs into %s (det_mode=%s)", args.duration, outdir, det_mode)
+        # Signal handling so Ctrl+C still flushes the manifest. Installed
+        # before warmup so the user can abort a slow startup.
+        interrupted = {"flag": False}
+        def _handle_sigint(_sig, _frm):
+            interrupted["flag"] = True
+        signal.signal(signal.SIGINT, _handle_sigint)
 
-        stop_at = time.time() + args.duration
+        # Sensor warmup: the BMI270 IMU on RVC4 has a several-second cold
+        # start — empirically the first host-visible IMU packet arrives
+        # ~4 s after pipeline.start() regardless of batchReportThreshold.
+        # If we start the capture countdown immediately, the earliest
+        # frames carry zero IMU samples and downstream VIO has nothing to
+        # align against. Drain sync/det every tick (so queues don't back
+        # up), but *buffer* any IMU samples that land during warmup so
+        # they're available to the first captured frame rather than
+        # being thrown away.
         frame_idx = 0
         last_imu_ts_ns = 0
         imu_buffer: list[ImuSample] = []
         total_tracked_objects = 0  # spec v1.1: must be > 0 across the capture
 
-        # Signal handling so Ctrl+C still flushes the manifest.
-        interrupted = {"flag": False}
-        def _handle_sigint(_sig, _frm):
-            interrupted["flag"] = True
-        signal.signal(signal.SIGINT, _handle_sigint)
+        logger.info("Warming up sensors (IMU has ~4 s cold start on RVC4)…")
+        warmup_start = time.time()
+        warmup_timeout_s = 10.0
+        imu_live = False
+        while time.time() - warmup_start < warmup_timeout_s and not interrupted["flag"]:
+            _drain(queues["sync"])
+            if "det" in queues:
+                _drain(queues["det"])
+            pkt = queues["imu"].tryGet()
+            if pkt is not None:
+                for s in _extract_imu_samples(pkt, since_ns=last_imu_ts_ns):
+                    imu_buffer.append(s)
+                    last_imu_ts_ns = s.timestamp_ns
+                imu_live = True
+                break
+            time.sleep(0.01)
+        warmup_elapsed = time.time() - warmup_start
+        if imu_live:
+            logger.info(
+                "IMU live after %.2f s warmup (%d samples pre-buffered); starting capture",
+                warmup_elapsed, len(imu_buffer),
+            )
+        else:
+            logger.warning(
+                "IMU produced no samples in %.1f s warmup; proceeding anyway",
+                warmup_elapsed,
+            )
+
+        logger.info("Capturing %.1fs into %s (det_mode=%s)", args.duration, outdir, det_mode)
+
+        stop_at = time.time() + args.duration
 
         while time.time() < stop_at and not interrupted["flag"]:
             group = queues["sync"].tryGet()

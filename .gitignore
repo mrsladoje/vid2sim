@@ -39,6 +39,17 @@ ruvector.db
 # artifacts per docs/plans/01-perception.md, but scratch runs should not be.
 data/captures/latest/
 data/captures/_tmp_*/
+data/captures/rec_*/
+data/captures/demo_*/
 
 # DepthAI Zoo model cache (auto-downloaded on first capture)
 .depthai_cached_models/
+
+# Local cache directories
+.cache/
+
+# Per-bundle debug renders from scripts/view_capture.py
+data/captures/**/_debug/
+
+# Warmup test images (4-5MB JPEGs — local only)
+data/warmup/

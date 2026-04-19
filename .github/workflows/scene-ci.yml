@@ -1,0 +1,64 @@
+name: Scene CI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/scene/**'
+      - 'tests/scene/**'
+      - 'spec/scene.schema.json'
+      - 'spec/scene.example.json'
+      - 'config/physics_lookup.yaml'
+      - 'pyproject.toml'
+      - '.github/workflows/scene-ci.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'src/scene/**'
+      - 'tests/scene/**'
+      - 'spec/scene.schema.json'
+      - 'spec/scene.example.json'
+      - 'config/physics_lookup.yaml'
+      - 'pyproject.toml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-scene-${{ hashFiles('pyproject.toml', '.github/workflows/scene-ci.yml') }}
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Lightweight stack — skips coacd/mujoco/anthropic (tests stub them).
+          pip install jsonschema numpy pyyaml pillow trimesh pygltflib pytest pytest-cov
+
+      - name: G0 gate — validate spec/scene.example.json against frozen schema
+        run: |
+          python - <<'PY'
+          import json
+          from jsonschema import Draft202012Validator
+          schema = json.load(open('spec/scene.schema.json'))
+          example = json.load(open('spec/scene.example.json'))
+          Draft202012Validator(schema).validate(example)
+          print("spec/scene.example.json validates against v1.0 schema")
+          PY
+
+      - name: Unit tests
+        run: pytest tests/scene -v
+
+      - name: G4 gate — ≥80% coverage on src/scene/exporters
+        run: |
+          pytest --cov=src/scene/exporters --cov-report=term-missing --cov-fail-under=80 tests/scene

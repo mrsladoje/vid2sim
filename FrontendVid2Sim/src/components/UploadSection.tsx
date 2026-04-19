@@ -137,7 +137,10 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
         setOakHint(null);
       } else if (videoInputs.length > 0) {
         setOakHint(
-          'OAK not visible to the browser. OAKs need a UVC pipeline active on the host before getUserMedia() can see them. Run "python scripts/oak_uvc.py" in a terminal (OAK-4/RVC4: "oakctl app run ./uvc_app" — see scripts/README.md), then refresh.',
+          'OAK not visible to the browser. The dev server auto-starts the UVC bridge ' +
+            '(FrontendVid2Sim/scripts/oak_uvc.py); look for [oak-uvc] messages in the terminal running `npm run dev`. ' +
+            'If you see an ImportError, run `pip install depthai` and restart the dev server. ' +
+            'OAK-4 / RVC4 requires the v3 path (`oakctl app run ./uvc_app`) — see scripts/README.md.',
         );
       }
       return videoInputs;

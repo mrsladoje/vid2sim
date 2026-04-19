@@ -56,17 +56,37 @@ touching `viewer.ts` or `physics.ts`.
 
 The live-capture tab auto-selects an OAK camera when one is detectable over
 UVC, but OAKs do NOT expose themselves as UVC webcams by default — they need
-a host-side pipeline to activate the UVC node. Start it before recording:
+a host-side pipeline to activate the UVC node.
+
+**This is automated.** A Vite plugin (`oakUvcBridge` in `vite.config.ts`)
+spawns `scripts/oak_uvc.py` on `npm run dev` and tears it down on shutdown.
+Look for `[oak-uvc]` prefixed lines in the terminal.
+
+One-time setup:
 
 ```bash
-pip install depthai                  # one-time
-python scripts/oak_uvc.py            # keep running
+pip install depthai   # in the same venv your `python` resolves to
 ```
 
-Then refresh the frontend; the OAK appears in the camera picker and the
-live-capture tab auto-selects it (matches labels containing `oak`, `luxonis`,
-or `depthai`). For OAK-4 / RVC4 use the v3 `oakctl app run ./uvc_app` path —
-see [`scripts/README.md`](scripts/README.md) for details.
+Then just:
+
+```bash
+npm run dev
+```
+
+### Env vars for the bridge
+
+| Var | Meaning |
+|---|---|
+| `VITE_NO_OAK_UVC=1` | Disable auto-start. Use when you only have a built-in webcam. |
+| `OAK_UVC_PYTHON=/path/to/python` | Override the Python interpreter (defaults to `python3` → `python` on PATH). Useful when your venv isn't activated. |
+
+### OAK-4 / RVC4
+
+OAK-4 uses DepthAI v3 and doesn't support the v2 `createUVC()` node that
+`oak_uvc.py` uses. The script detects this, prints a clean error, and points
+you at the v3 path: build a UVC OAK App and deploy via `oakctl app run
+./uvc_app` — see [`scripts/README.md`](scripts/README.md).
 
 ---
 

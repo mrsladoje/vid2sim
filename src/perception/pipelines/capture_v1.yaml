@@ -13,14 +13,22 @@
 # ROBOTICS, which is deterministic + well-understood; swapping in the neural
 # path is a G1–G2 upgrade gated on a smoke-tested blob.
 #
-# YOLOE-26 note: YOLOE-26 is an *open-vocabulary* detector — the class list
-# is supplied at runtime (`--prompts`) and the blob embeds a CLIP-style text
-# encoder. It does NOT have a fixed 80-class head like stock COCO YOLO. When
-# a blob is provided to `capture.py --yolo-blob`, it is loaded into a plain
-# `DetectionNetwork` (no fixed `classes: 80` config).
+# Segmentation note: as of capture.py rev 2026-04-19, the default network
+# is the Luxonis Zoo's `luxonis/yolov8-instance-segmentation-nano:coco-512x288`
+# model, loaded via `depthai_nodes.ParsingNeuralNetwork` + `dai.NNModelDescription`
+# (auto-download, cached). Output is `ImgDetectionsExtended` carrying
+# per-instance pixel masks at 512x288 → upsampled to RGB resolution on host
+# and stamped into mask_class.png + mask_track.png.
 #
-# **REQUIRED as of PerceptionFrame spec v1.1**: capture.py refuses to run
-# without `--yolo-blob` and `--prompts`, and aborts post-capture if zero
+# `--prompts` is now an opt-in COCO-80 whitelist (default: common household
+# objects: chair, couch, dining table, bottle, cup, vase, ...). Detections
+# in classes outside the whitelist are dropped before the bundle is written.
+#
+# `--yolo-blob` is OPTIONAL — when given, a custom blob is loaded into a
+# plain `DetectionNetwork` and the mask path falls back to bbox-rectangle
+# blits (no per-instance pixel masks).
+#
+# **REQUIRED per spec v1.1**: capture.py aborts post-capture if zero
 # tracked objects were emitted across the entire run. Stream 02 cannot
 # reconstruct anything from a bundle without per-object masks.
 
@@ -73,30 +81,33 @@ nodes:
     batch_report_threshold: 1
     max_batch_reports: 10
 
-  # REQUIRED as of spec v1.1 — capture.py mandates --yolo-blob.
-  - id: yoloe
-    type: DetectionNetwork
-    blob: "<set via capture.py --yolo-blob>"
+  # Default (zero-config): Luxonis Zoo YOLOv8-Seg via depthai_nodes
+  # ParsingNeuralNetwork — output is ImgDetectionsExtended with per-instance
+  # pixel masks. capture.py builds this when --yolo-blob is omitted.
+  - id: detector
+    type: ParsingNeuralNetwork
+    zoo_model: "luxonis/yolov8-instance-segmentation-nano:coco-512x288"
     confidence_threshold: 0.4
-    open_vocab_prompts: "<set via capture.py --prompts>"
+    coco_class_whitelist: "<set via capture.py --prompts>"
+    output: "ImgDetectionsExtended (boxes + per-instance pixel masks)"
 
 connections:
   - cam_left.out  -> stereo.left
   - cam_right.out -> stereo.right
-  - cam_rgb.out   -> yoloe.input   # only when yoloe is present
+  - cam_rgb.out   -> detector.input
 
 host_output_queues:
   - name: rgb      bound_to: cam_rgb.output
   - name: depth    bound_to: stereo.depth
   - name: conf     bound_to: stereo.confidenceMap
   - name: imu      bound_to: imu.out
-  - name: det      bound_to: yoloe.out   # only when yoloe is present
+  - name: det      bound_to: detector.out
 
 bundle_mapping:
   rgb          -> frames/XXXXX.rgb.jpg        # JPEG q=90
   depth        -> frames/XXXXX.depth.png      # 16-bit PNG, mm
   conf         -> frames/XXXXX.conf.png       # 8-bit PNG
-  mask_class   -> frames/XXXXX.mask_class.png # 8-bit PNG  (REQUIRED non-trivial — spec v1.1)
-  mask_track   -> frames/XXXXX.mask_track.png # 16-bit PNG (REQUIRED non-trivial — spec v1.1)
+  mask_class   -> frames/XXXXX.mask_class.png # 8-bit PNG, COCO label idx (per-pixel via YOLOv8-Seg)
+  mask_track   -> frames/XXXXX.mask_track.png # 16-bit PNG, per-instance track id
   imu          -> frames/XXXXX.imu.jsonl      # ~26 samples per frame at 15 fps, 400 Hz
   objects      -> frames/XXXXX.objects.json   # REQUIRED ≥1 detection across capture (spec v1.1)

@@ -10,20 +10,31 @@ this boundary.
 1. **Plug in the camera.** USB-C to the host; use USB 3 cable for 1080p/15.
 2. **Install deps** (first time only):
    ```bash
-   python -m pip install depthai numpy pillow opencv-python-headless pytest pytest-cov
+   python -m pip install -e ".[perception]"
+   python -m pip install pytest pytest-cov
    ```
+   This pulls `depthai`, `depthai-nodes` (for the YOLOv8-Seg parser), and
+   `opencv-python-headless`.
 3. **Confirm the camera enumerates**:
    ```bash
    python -c "from src.perception.capture import smoke_test; smoke_test(seconds=3)"
    ```
    Expect `smoke_test: NN frames in 3.0s` with NN > 10.
-4. **Run a capture** (hero object on the venue table, 10 s):
+4. **Run a capture** (zero-config — auto-downloads YOLOv8-Seg from the Luxonis Zoo):
+   ```bash
+   python -m src.perception.capture --outdir data/captures/hero_01 --duration 10
+   ```
+   First run downloads the model (~10 MB, cached after that). Logs end with
+   `Wrote <N> frames to data/captures/hero_01` and `Capture invariant OK: M
+   total tracked-object detections`. On USB 2 you should see 90–110 frames;
+   on USB 3, closer to 150.
+
+   Filter to specific COCO classes (defaults to a household whitelist):
    ```bash
    python -m src.perception.capture --outdir data/captures/hero_01 \
-       --duration 10 --fps 15 --prompts chair
+       --duration 10 --prompts chair bottle cup
    ```
-   Logs end with `Wrote <N> frames to data/captures/hero_01`. On USB 2 you
-   should see 90–110 frames; on USB 3, closer to 150.
+   Pass `--prompts all` to keep every COCO-80 detection.
 5. **Validate** against the spec:
    ```bash
    python -m pytest tests/perception -q
@@ -45,21 +56,37 @@ python -m src.perception.replay --bundle data/captures/hero_01 --fps 15
 Prints one log line per second with frame shape. Use `--loop` for demo-day
 standby and `--max-frames N` for quick tests.
 
-## Open-vocabulary segmentation (YOLOE-26)
+## Per-instance segmentation
 
-`capture.py` runs *without* a YOLOE blob by default — mask files are zero
-(background) and `objects.json` is empty. To enable segmentation:
+The default network is the Luxonis Zoo's
+`luxonis/yolov8-instance-segmentation-nano:coco-512x288` model (auto-downloaded,
+cached). Output is `ImgDetectionsExtended` carrying per-instance pixel
+masks at 512×288, upsampled on the host to RGB resolution and stamped into
+`mask_class.png` + `mask_track.png`.
+
+`--prompts` is an opt-in COCO-80 whitelist. Default covers common indoor
+hero objects: `chair`, `couch`, `dining table`, `bed`, `bottle`, `cup`,
+`wine glass`, `bowl`, `vase`, `potted plant`, `tv`, `laptop`, `book`,
+`teddy bear`. Detections in classes outside the whitelist are dropped
+before being written. Pass `--prompts all` to keep every COCO class.
+
+Class indices in `mask_class.png` are the COCO-80 label index + 1 (so
+`bottle` → 40, `chair` → 57; 0 = background — see
+`capture.py::COCO_80_CLASSES` for the full ordering). Track IDs come from
+detection order inside a frame (simple placeholder until a proper
+ObjectTracker is plumbed).
+
+### Custom blobs (legacy bbox-rectangle path)
+
+If you have a custom YOLO blob (e.g. a non-COCO model), pass it
+explicitly. Mask output is bbox rectangles only — no per-instance pixel
+masks — but the bundle is still spec-compliant.
 
 ```bash
 python -m src.perception.capture --outdir data/captures/demo_scene \
-    --duration 10 --prompts chair table cup bottle \
-    --yolo-blob models/yoloe_26_open_vocab.blob
+    --duration 10 --prompts chair bottle cup \
+    --yolo-blob models/my_custom.blob
 ```
-
-Class indices in `mask_class.png` follow the prompt order (1 = chair,
-2 = table, ... ; 0 = background). Track IDs come from the detection order
-inside a frame (simple placeholder until a proper ObjectTracker blob is
-plumbed).
 
 ## Stub generator (development without hardware)
 

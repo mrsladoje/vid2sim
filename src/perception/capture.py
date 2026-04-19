@@ -5,16 +5,25 @@ runtime YAML loader — the YAML under `pipelines/` is a documented spec, not
 a loadable graph), subscribes to the host output queues, and writes a
 PerceptionFrame bundle to disk via `bundle.BundleWriter`.
 
-Usage:
-    python -m src.perception.capture --outdir data/captures/hero_01 --duration 10 \
-        --prompts bottle popcorn_cup --yolo-blob /path/to/yoloe26.blob
+Quick start (zero-config — auto-downloads YOLOv8-Seg from the Luxonis Zoo):
 
-YOLOE-26 open-vocab segmentation is REQUIRED (per PerceptionFrame spec
-v1.1): downstream Stream 02 reconstruction needs per-object class/track
-masks + object metadata to do per-instance mesh generation. A capture
-without these is unusable — `--yolo-blob` and `--prompts` are mandatory,
-and the run aborts if the segmenter produced zero tracked objects across
-the entire session.
+    python -m src.perception.capture --outdir data/captures/hero_01 --duration 10
+
+Optional: filter detections to a specific subset of COCO-80 classes:
+
+    python -m src.perception.capture --outdir data/captures/hero_01 \
+        --prompts chair bottle cup bowl
+
+Optional: use your own YOLOv8 blob (legacy bbox-rectangle masks; the Zoo
+default gives per-instance pixel masks):
+
+    python -m src.perception.capture --outdir data/captures/hero_01 \
+        --yolo-blob /path/to/custom.blob --prompts chair
+
+Per-object segmentation is mandatory (PerceptionFrame spec v1.1):
+downstream Stream 02 reconstruction needs per-object class/track masks +
+object metadata to do per-instance mesh generation. The capture aborts
+post-run if zero tracked objects were emitted across the entire session.
 """
 
 from __future__ import annotations
@@ -53,6 +62,39 @@ DEFAULT_FPS = 15
 DEFAULT_DURATION_S = 10
 IMU_RATE_HZ = 400
 
+# Zero-config default: Luxonis Zoo's YOLOv8 instance segmentation nano.
+# Outputs per-instance pixel masks (not bbox rectangles) → much cleaner
+# per-object point clouds in Stream 02 → cleaner SF3D meshes downstream.
+# Auto-downloads on first use via dai.NNModelDescription.
+DEFAULT_ZOO_MODEL = "luxonis/yolov8-instance-segmentation-nano:coco-512x288"
+
+# COCO-80 class list — the model's training ontology. Index = label id
+# straight from the network. Used for both class-name lookup and the
+# whitelist filter applied via --prompts.
+COCO_80_CLASSES: tuple[str, ...] = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag",
+    "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
+    "baseball bat", "baseball glove", "skateboard", "surfboard",
+    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon",
+    "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
+    "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
+    "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
+    "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush",
+)
+
+# Sensible default prompt set for indoor "hero object" capture. Covers
+# everything Person 1's typical scenes contain. Override with --prompts.
+DEFAULT_HOUSEHOLD_PROMPTS: tuple[str, ...] = (
+    "chair", "couch", "dining table", "bed",
+    "bottle", "cup", "wine glass", "bowl", "vase",
+    "potted plant", "tv", "laptop", "book", "teddy bear",
+)
+
 
 def _nn_resize_u16(arr: np.ndarray, w: int, h: int) -> np.ndarray:
     ys = (np.arange(h) * arr.shape[0] / h).astype(np.int32)
@@ -66,18 +108,66 @@ def _nn_resize_u8(arr: np.ndarray, w: int, h: int) -> np.ndarray:
     return arr[np.ix_(ys, xs)].astype(np.uint8)
 
 
+def _resize_mask_to_rgb(mask: np.ndarray) -> np.ndarray:
+    """Nearest-neighbour upscale a binary instance mask to (RGB_HEIGHT, RGB_WIDTH).
+
+    YOLOv8-Seg masks come out at the model's processing resolution
+    (typically 512x288 for the Zoo nano). Stream 02 expects masks at the
+    same resolution as the RGB / depth (1920x1080), so we upsample here.
+    """
+    if mask.shape == (RGB_HEIGHT, RGB_WIDTH):
+        return mask
+    return _nn_resize_u8(mask.astype(np.uint8), RGB_WIDTH, RGB_HEIGHT)
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser("VID2SIM Perception capture daemon")
     p.add_argument("--outdir", required=True, help="Output bundle directory")
     p.add_argument("--duration", type=float, default=DEFAULT_DURATION_S, help="Capture seconds")
     p.add_argument("--fps", type=int, default=DEFAULT_FPS, help="Target camera FPS")
-    p.add_argument("--prompts", nargs="+", required=True,
-                   help="YOLOE open-vocab class prompts (REQUIRED, e.g. 'bottle popcorn_cup chair')")
-    p.add_argument("--yolo-blob", required=True,
-                   help="Path to YOLOE-26 blob (REQUIRED — per spec v1.1, segmentation is mandatory)")
+    p.add_argument(
+        "--prompts", nargs="+", default=list(DEFAULT_HOUSEHOLD_PROMPTS),
+        help=(
+            "Subset of COCO-80 class names to keep in masks. "
+            "Default: common household objects. Pass `--prompts all` to "
+            "keep every COCO class. Detections in classes outside this set "
+            "are dropped before being written to mask_class / mask_track."
+        ),
+    )
+    p.add_argument(
+        "--yolo-blob", default=None,
+        help=(
+            "Optional: path to a custom YOLOv8 detection blob. If omitted, "
+            "auto-downloads the Luxonis Zoo's instance-segmentation model "
+            f"({DEFAULT_ZOO_MODEL}) which gives per-instance pixel masks. "
+            "Custom blobs use the legacy bbox-rectangle mask path."
+        ),
+    )
+    p.add_argument(
+        "--zoo-model", default=DEFAULT_ZOO_MODEL,
+        help="Luxonis Zoo model identifier to use when --yolo-blob is omitted.",
+    )
+    p.add_argument(
+        "--conf-threshold", type=float, default=0.4,
+        help="Per-detection confidence threshold (default: 0.4).",
+    )
     p.add_argument("--session-id", default=None, help="Override session_id in manifest")
     p.add_argument("--log-level", default="INFO")
     return p.parse_args(argv)
+
+
+def _resolve_prompts(prompts: list[str]) -> set[str]:
+    """Validate --prompts against COCO-80 and return a fast lookup set."""
+    if len(prompts) == 1 and prompts[0].lower() == "all":
+        return set(COCO_80_CLASSES)
+    coco_set = set(COCO_80_CLASSES)
+    bad = [p for p in prompts if p not in coco_set]
+    if bad:
+        raise ValueError(
+            f"Unknown COCO-80 class names in --prompts: {bad}. "
+            f"Valid classes (sorted): {sorted(coco_set)}"
+        )
+    return set(prompts)
 
 
 def _build_intrinsics(device: "dai.Device") -> Intrinsics:
@@ -110,8 +200,13 @@ def _build_manifest(
     )
 
 
-def _build_pipeline(fps: int, yolo_blob: Optional[Path]):
-    """Return (pipeline, handles_dict) — handles expose the output Queues."""
+def _build_pipeline(
+    fps: int,
+    zoo_model: str,
+    yolo_blob: Optional[Path],
+    conf_threshold: float,
+):
+    """Return (pipeline, handles_dict). handles include 'det_mode' = 'seg' | 'bbox'."""
     if dai is None:
         raise RuntimeError("depthai not installed")
 
@@ -159,13 +254,128 @@ def _build_pipeline(fps: int, yolo_blob: Optional[Path]):
     }
 
     if yolo_blob is not None:
-        logger.info("Wiring YOLOE-26 DetectionNetwork with blob %s", yolo_blob)
+        # Legacy: user-supplied blob → plain DetectionNetwork → bbox boxes
+        # only. Mask path falls back to bbox-rectangle blits.
+        logger.info("Wiring legacy DetectionNetwork with custom blob %s", yolo_blob)
         det = p.create(dai.node.DetectionNetwork)
         det.setBlobPath(yolo_blob)  # type: ignore[arg-type]
-        det.setConfidenceThreshold(0.4)
+        det.setConfidenceThreshold(conf_threshold)
         rgb_out.link(det.input)
         queues["det"] = det.out.createOutputQueue(maxSize=8, blocking=False)
+        queues["det_mode"] = "bbox"  # type: ignore[assignment]
+    else:
+        # Default: Zoo YOLOv8-Seg via depthai_nodes' ParsingNeuralNetwork.
+        # Auto-downloads + caches the model; output is ImgDetectionsExtended
+        # with per-instance pixel masks (not just bboxes). Massive quality
+        # win for Stream 02 reconstruction.
+        try:
+            from depthai_nodes import ParsingNeuralNetwork  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "depthai_nodes is required for the default Zoo segmentation "
+                "path. Install with: pip install depthai-nodes\n"
+                "Or pass --yolo-blob /path/to/your.blob to use a custom "
+                "detection-only model."
+            ) from exc
+        logger.info("Wiring ParsingNeuralNetwork with Zoo model %s", zoo_model)
+        model_desc = dai.NNModelDescription(zoo_model)
+        nn = p.create(ParsingNeuralNetwork).build(rgb_out, model_desc)
+        try:
+            nn.setConfidenceThreshold(conf_threshold)  # type: ignore[attr-defined]
+        except Exception:
+            # Some versions of ParsingNeuralNetwork wrap the threshold in
+            # the parser config rather than the network node — non-fatal.
+            logger.debug("setConfidenceThreshold not available on ParsingNeuralNetwork; "
+                         "relying on parser default.")
+        queues["det"] = nn.out.createOutputQueue(maxSize=8, blocking=False)
+        queues["det_mode"] = "seg"  # type: ignore[assignment]
     return p, queues
+
+
+def _process_seg_detections(
+    det_msg, mask_cls: np.ndarray, mask_trk: np.ndarray, allowed_classes: set[str],
+) -> list[ObjectRecord]:
+    """Fill mask_cls / mask_trk from an ImgDetectionsExtended message.
+
+    Per-instance binary masks come back at the model's processing
+    resolution (e.g. 512x288). We upsample each one to the full RGB
+    resolution and stamp class index + track id where the mask is true.
+    """
+    objects: list[ObjectRecord] = []
+    detections = list(getattr(det_msg, "detections", []) or [])
+    # `masks` is a single (N, h, w) numpy array per the depthai_nodes
+    # ImgDetectionsExtended schema. Some firmware versions expose
+    # `det.mask` per detection instead — handle both.
+    masks_array = getattr(det_msg, "masks", None)
+    for det_idx, det in enumerate(detections):
+        cls_idx = int(getattr(det, "label", -1))
+        if 0 <= cls_idx < len(COCO_80_CLASSES):
+            cls_name = COCO_80_CLASSES[cls_idx]
+        else:
+            cls_name = "unknown"
+        if cls_name not in allowed_classes:
+            continue
+        # Extract this detection's binary mask.
+        binary: Optional[np.ndarray] = None
+        per_det_mask = getattr(det, "mask", None)
+        if per_det_mask is not None:
+            binary = np.asarray(per_det_mask)
+        elif masks_array is not None and det_idx < len(masks_array):
+            binary = np.asarray(masks_array[det_idx])
+        if binary is None or binary.size == 0:
+            # Fall back to bbox rectangle if the mask isn't available.
+            x1 = int(det.xmin * RGB_WIDTH)
+            y1 = int(det.ymin * RGB_HEIGHT)
+            x2 = int(det.xmax * RGB_WIDTH)
+            y2 = int(det.ymax * RGB_HEIGHT)
+            track_id = len(objects) + 1
+            mask_cls[y1:y2, x1:x2] = cls_idx + 1
+            mask_trk[y1:y2, x1:x2] = track_id
+        else:
+            full = _resize_mask_to_rgb(binary > 0)
+            track_id = len(objects) + 1
+            mask_cls[full > 0] = cls_idx + 1
+            mask_trk[full > 0] = track_id
+        x1 = int(det.xmin * RGB_WIDTH)
+        y1 = int(det.ymin * RGB_HEIGHT)
+        x2 = int(det.xmax * RGB_WIDTH)
+        y2 = int(det.ymax * RGB_HEIGHT)
+        objects.append(ObjectRecord(
+            track_id=track_id,
+            cls=cls_name,
+            bbox2d=(x1, y1, x2, y2),
+            conf=float(getattr(det, "confidence", 0.0)),
+        ))
+    return objects
+
+
+def _process_bbox_detections(
+    det_msg, mask_cls: np.ndarray, mask_trk: np.ndarray, allowed_classes: set[str],
+) -> list[ObjectRecord]:
+    """Legacy fallback: stamp bbox rectangles into mask_cls / mask_trk."""
+    objects: list[ObjectRecord] = []
+    for d in det_msg.detections:
+        cls_idx = int(d.label)
+        if 0 <= cls_idx < len(COCO_80_CLASSES):
+            cls_name = COCO_80_CLASSES[cls_idx]
+        else:
+            cls_name = "unknown"
+        if cls_name not in allowed_classes:
+            continue
+        x1 = int(d.xmin * RGB_WIDTH)
+        y1 = int(d.ymin * RGB_HEIGHT)
+        x2 = int(d.xmax * RGB_WIDTH)
+        y2 = int(d.ymax * RGB_HEIGHT)
+        track_id = len(objects) + 1
+        mask_cls[y1:y2, x1:x2] = cls_idx + 1
+        mask_trk[y1:y2, x1:x2] = track_id
+        objects.append(ObjectRecord(
+            track_id=track_id,
+            cls=cls_name,
+            bbox2d=(x1, y1, x2, y2),
+            conf=float(d.confidence),
+        ))
+    return objects
 
 
 def _extract_imu_samples(packet, since_ns: int = 0) -> list[ImuSample]:
@@ -203,15 +413,24 @@ def run_capture(args: argparse.Namespace) -> int:
         return 2
     outdir = Path(args.outdir)
     session_id = args.session_id or outdir.name
-    yolo_blob = Path(args.yolo_blob)
-    if not yolo_blob.exists():
-        logger.error("YOLO blob not found: %s — segmentation is mandatory per spec v1.1", yolo_blob)
-        return 2
-    if not args.prompts:
-        logger.error("--prompts must contain at least one class label")
+
+    yolo_blob = Path(args.yolo_blob) if args.yolo_blob else None
+    if yolo_blob is not None and not yolo_blob.exists():
+        logger.error("Custom --yolo-blob not found at %s", yolo_blob)
         return 2
 
-    pipeline, queues = _build_pipeline(args.fps, yolo_blob)
+    try:
+        allowed_classes = _resolve_prompts(args.prompts)
+    except ValueError as exc:
+        logger.error(str(exc))
+        return 2
+    logger.info("Active class whitelist (%d classes): %s",
+                len(allowed_classes), sorted(allowed_classes))
+
+    pipeline, queues = _build_pipeline(
+        args.fps, args.zoo_model, yolo_blob, args.conf_threshold,
+    )
+    det_mode = queues.get("det_mode", "bbox")
     pipeline.start()
     try:
         device = pipeline.getDefaultDevice()
@@ -222,7 +441,7 @@ def run_capture(args: argparse.Namespace) -> int:
 
         writer = BundleWriter(outdir, manifest, intrinsics)
 
-        logger.info("Capturing %.1fs into %s", args.duration, outdir)
+        logger.info("Capturing %.1fs into %s (det_mode=%s)", args.duration, outdir, det_mode)
 
         stop_at = time.time() + args.duration
         frame_idx = 0
@@ -266,22 +485,14 @@ def run_capture(args: argparse.Namespace) -> int:
             if "det" in queues:
                 det_msg = queues["det"].tryGet()
                 if det_msg is not None:
-                    for d in det_msg.detections:
-                        x1 = int(d.xmin * RGB_WIDTH)
-                        y1 = int(d.ymin * RGB_HEIGHT)
-                        x2 = int(d.xmax * RGB_WIDTH)
-                        y2 = int(d.ymax * RGB_HEIGHT)
-                        cls_idx = int(d.label) + 1  # 0 reserved for background
-                        track_id = len(objects) + 1
-                        mask_cls[y1:y2, x1:x2] = cls_idx
-                        mask_trk[y1:y2, x1:x2] = track_id
-                        cls_name = args.prompts[d.label] if d.label < len(args.prompts) else "unknown"
-                        objects.append(ObjectRecord(
-                            track_id=track_id,
-                            cls=cls_name,
-                            bbox2d=(x1, y1, x2, y2),
-                            conf=float(d.confidence),
-                        ))
+                    if det_mode == "seg":
+                        objects = _process_seg_detections(
+                            det_msg, mask_cls, mask_trk, allowed_classes,
+                        )
+                    else:
+                        objects = _process_bbox_detections(
+                            det_msg, mask_cls, mask_trk, allowed_classes,
+                        )
 
             # Flush buffered IMU samples that arrived before this frame.
             frame_ts_ns = int(rgb_msg.getTimestampDevice().total_seconds() * 1e9)
@@ -311,10 +522,11 @@ def run_capture(args: argparse.Namespace) -> int:
         if total_tracked_objects == 0:
             logger.error(
                 "INVARIANT VIOLATION: 0 tracked objects across %d frames. "
-                "Check the YOLOE blob, prompts (%s), and that the scene "
-                "actually contains the prompted classes. Bundle written but "
-                "marked invalid.",
-                writer.n_written, args.prompts,
+                "Check that the prompted classes (%s) actually appear in "
+                "the scene. The default whitelist covers common household "
+                "objects; pass --prompts <coco classes> to broaden it, or "
+                "--prompts all to keep every detection.",
+                writer.n_written, sorted(allowed_classes)[:5],
             )
             return 3
         logger.info("Capture invariant OK: %d total tracked-object detections across %d frames",

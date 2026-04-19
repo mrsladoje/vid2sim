@@ -26,6 +26,14 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.5",
 ]
+perception = [
+    # Stream 01 (capture) deps. depthai_nodes provides ParsingNeuralNetwork
+    # + YOLOExtendedParser, which lets us pull instance-segmentation models
+    # straight out of the Luxonis Zoo with auto-download.
+    "depthai>=3.5.0",
+    "depthai-nodes>=0.2",
+    "opencv-python-headless>=4.9",
+]
 usd = [
     "usd-core>=24.08",
 ]

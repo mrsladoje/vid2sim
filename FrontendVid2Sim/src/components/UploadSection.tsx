@@ -60,6 +60,27 @@ function captureFilename(): string {
 }
 
 /**
+ * OAK-IP bridge endpoints. For network-attached OAKs (e.g. OAK-4 over
+ * ethernet) UVC is not possible — the Python bridge (scripts/oak_uvc.py)
+ * instead serves MJPEG on localhost:8765 and we consume it in the browser.
+ */
+const BRIDGE_HEALTH_URL = 'http://127.0.0.1:8765/health';
+const BRIDGE_STREAM_URL = 'http://127.0.0.1:8765/stream.mjpg';
+
+async function probeBridge(): Promise<boolean> {
+  try {
+    const res = await fetch(BRIDGE_HEALTH_URL, { cache: 'no-store' });
+    if (!res.ok) return false;
+    const ct = res.headers.get('content-type') ?? '';
+    if (!ct.includes('json')) return false;
+    const body = (await res.json()) as { ok?: boolean; source?: string };
+    return body?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * True if a device's label looks like a Luxonis OAK camera. OAK devices
  * exposed in UVC mode typically advertise a label containing "OAK" (e.g.
  * "OAK-4", "OAK-D Pro", "OAK-1 (03e7:2485)").
@@ -92,22 +113,48 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
 
   const livePreviewRef = useRef<HTMLVideoElement>(null);
   const playbackRef = useRef<HTMLVideoElement>(null);
+  const bridgeImgRef = useRef<HTMLImageElement | null>(null);
+  const bridgeCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const bridgeRafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const tickStartRef = useRef<number>(0);
   const tickRafRef = useRef<number | null>(null);
   const devicesEnumeratedRef = useRef<boolean>(false);
+  const bridgeActiveRef = useRef<boolean>(false);
+  const [bridgeActive, setBridgeActive] = useState(false);
+  useEffect(() => { bridgeActiveRef.current = bridgeActive; }, [bridgeActive]);
 
   // ------------------------------------------------------------------
   // Camera lifecycle: start when mode=='live' and we're not reviewing.
   // ------------------------------------------------------------------
+  const stopBridge = useCallback(() => {
+    if (bridgeRafRef.current !== null) {
+      cancelAnimationFrame(bridgeRafRef.current);
+      bridgeRafRef.current = null;
+    }
+    const img = bridgeImgRef.current;
+    if (img) {
+      img.src = '';
+      img.remove();
+      bridgeImgRef.current = null;
+    }
+    const canvas = bridgeCanvasRef.current;
+    if (canvas) {
+      canvas.remove();
+      bridgeCanvasRef.current = null;
+    }
+    setBridgeActive(false);
+  }, []);
+
   const stopStream = useCallback(() => {
     if (streamRef.current) {
       for (const track of streamRef.current.getTracks()) track.stop();
       streamRef.current = null;
     }
-  }, []);
+    stopBridge();
+  }, [stopBridge]);
 
   const attachStreamToPreview = useCallback(async (stream: MediaStream) => {
     const video = livePreviewRef.current;
@@ -119,6 +166,89 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
       // Autoplay can be blocked; next user gesture resumes it.
     });
   }, []);
+
+  /**
+   * Build a MediaStream from the Python MJPEG bridge. The OAK-4 connected
+   * over ethernet cannot expose UVC (UVC is USB-only), so instead the
+   * Python script serves MJPEG on localhost:8765. We:
+   *   1. Load the MJPEG into a hidden `<img>` (browsers decode MJPEG natively)
+   *   2. rAF-blit the img onto a hidden `<canvas>` at 30fps
+   *   3. `canvas.captureStream(30)` gives us a MediaStream that MediaRecorder
+   *      and our preview `<video>` both accept unchanged.
+   * Result: no other code path needs to know whether frames came from UVC
+   * or from the bridge.
+   */
+  const startOakBridge = useCallback(async (): Promise<MediaStream | null> => {
+    const healthy = await probeBridge();
+    if (!healthy) return null;
+
+    const img = document.createElement('img');
+    img.crossOrigin = 'anonymous';
+    img.style.display = 'none';
+    document.body.appendChild(img);
+    bridgeImgRef.current = img;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    canvas.style.display = 'none';
+    document.body.appendChild(canvas);
+    bridgeCanvasRef.current = canvas;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      stopBridge();
+      return null;
+    }
+
+    // Wait until at least one frame decoded — otherwise captureStream has no
+    // content and MediaRecorder may fail to start.
+    await new Promise<void>((resolve, reject) => {
+      const onLoad = () => {
+        if (img.naturalWidth > 0) {
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          resolve();
+        }
+      };
+      img.addEventListener('load', onLoad, { once: true });
+      img.addEventListener(
+        'error',
+        () => reject(new Error('OAK bridge image stream failed to load')),
+        { once: true },
+      );
+      img.src = BRIDGE_STREAM_URL;
+      // Fallback timeout in case `load` never fires (some browsers only emit
+      // load once per multipart stream, others emit per frame).
+      setTimeout(() => {
+        if (img.naturalWidth > 0) {
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          resolve();
+        }
+      }, 1500);
+    });
+
+    const render = () => {
+      if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+        if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+        }
+        try {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        } catch {
+          // CORS taint or transient error — the handler logs the failure.
+        }
+      }
+      bridgeRafRef.current = requestAnimationFrame(render);
+    };
+    bridgeRafRef.current = requestAnimationFrame(render);
+
+    const stream = (canvas as HTMLCanvasElement).captureStream(30);
+    setBridgeActive(true);
+    return stream;
+  }, [stopBridge]);
 
   /**
    * Enumerate video inputs. Labels are only populated after at least one
@@ -135,12 +265,14 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
       const oak = videoInputs.find((d) => isOakDevice(d.label));
       if (oak) {
         setOakHint(null);
-      } else if (videoInputs.length > 0) {
+      } else if (videoInputs.length > 0 && !bridgeActiveRef.current) {
         setOakHint(
-          'OAK not visible to the browser. The dev server auto-starts the UVC bridge ' +
-            '(FrontendVid2Sim/scripts/oak_uvc.py); look for [oak-uvc] messages in the terminal running `npm run dev`. ' +
-            'If you see an ImportError, run `pip install depthai` and restart the dev server. ' +
-            'OAK-4 / RVC4 requires the v3 path (`oakctl app run ./uvc_app`) — see scripts/README.md.',
+          'OAK not detected. The dev server auto-starts scripts/oak_uvc.py — look for [oak-uvc] ' +
+            'messages in the terminal running `npm run dev`. For a USB-attached OAK the script ' +
+            'opens UVC mode; for a network-attached OAK (e.g. OAK-4 on ethernet, UVC impossible) ' +
+            'it serves MJPEG at http://127.0.0.1:8765/stream.mjpg which this page consumes ' +
+            'automatically. If the bridge isn\'t running: `pip install depthai opencv-python` and ' +
+            'restart the dev server.',
         );
       }
       return videoInputs;
@@ -157,6 +289,30 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
    */
   const startCamera = useCallback(
     async (preferredDeviceId?: string | null) => {
+      setLiveState('init');
+      setMediaErr(null);
+      stopStream();
+
+      // Prefer the OAK IP bridge (if the Python script is running). This
+      // is the only way a network-attached OAK reaches the browser, since
+      // UVC is USB-only.
+      if (!preferredDeviceId) {
+        try {
+          const bridgeStream = await startOakBridge();
+          if (bridgeStream) {
+            streamRef.current = bridgeStream;
+            await attachStreamToPreview(bridgeStream);
+            setDevicePath('OAK · IP bridge · 1280×720@30fps');
+            setOakHint(null);
+            setLiveState('preview');
+            return;
+          }
+        } catch (err) {
+          console.warn('[UploadSection] OAK IP bridge failed, falling back to getUserMedia', err);
+          stopBridge();
+        }
+      }
+
       if (!navigator.mediaDevices?.getUserMedia) {
         setLiveState('error');
         setMediaErr(
@@ -165,9 +321,6 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
         return;
       }
       try {
-        setLiveState('init');
-        setMediaErr(null);
-        stopStream();
 
         const videoConstraint: MediaTrackConstraints = preferredDeviceId
           ? { deviceId: { exact: preferredDeviceId } }
@@ -235,7 +388,7 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
         );
       }
     },
-    [attachStreamToPreview, refreshDevices, stopStream],
+    [attachStreamToPreview, refreshDevices, startOakBridge, stopBridge, stopStream],
   );
 
   /** User picked a device from the dropdown. */
@@ -535,17 +688,24 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
                 />
 
                 {/* Top-left telemetry */}
-                <div className="absolute top-3 left-3 px-2 py-1 rounded bg-black/50 backdrop-blur-sm border border-border text-[10px] font-mono uppercase tracking-[0.2em] text-textSecondary flex items-center gap-2">
-                  <span
-                    className={`w-1.5 h-1.5 rounded-full ${
-                      isRecording
-                        ? 'bg-red-500 animate-pulse'
-                        : liveState === 'preview'
-                          ? 'bg-emerald-400 animate-pulse'
-                          : 'bg-yellow-400'
-                    }`}
-                  />
-                  {isRecording ? 'rec' : liveState === 'preview' ? 'live' : liveState === 'review' ? 'buf' : 'init'}
+                <div className="absolute top-3 left-3 flex items-center gap-2">
+                  <div className="px-2 py-1 rounded bg-black/50 backdrop-blur-sm border border-border text-[10px] font-mono uppercase tracking-[0.2em] text-textSecondary flex items-center gap-2">
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        isRecording
+                          ? 'bg-red-500 animate-pulse'
+                          : liveState === 'preview'
+                            ? 'bg-emerald-400 animate-pulse'
+                            : 'bg-yellow-400'
+                      }`}
+                    />
+                    {isRecording ? 'rec' : liveState === 'preview' ? 'live' : liveState === 'review' ? 'buf' : 'init'}
+                  </div>
+                  {bridgeActive && (
+                    <div className="px-2 py-1 rounded bg-emerald-500/15 backdrop-blur-sm border border-emerald-500/40 text-[10px] font-mono uppercase tracking-[0.18em] text-emerald-300">
+                      OAK · IP bridge
+                    </div>
+                  )}
                 </div>
 
                 {/* Elapsed timer */}

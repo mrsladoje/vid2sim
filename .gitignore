@@ -41,6 +41,7 @@ data/captures/latest/
 data/captures/_tmp_*/
 data/captures/rec_*/
 data/captures/demo_*/
+data/captures/live_*/
 
 # DepthAI Zoo model cache (auto-downloaded on first capture)
 .depthai_cached_models/

@@ -41,6 +41,8 @@ const PAGE_VARIANTS: Variants = {
 
 function App() {
   const [appState, setAppState] = useState<AppState>('hero');
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const inAppWorkspace = WORKSPACE_STATES.includes(appState);
 
   const renderCurrentState = () => {
@@ -56,11 +58,28 @@ function App() {
       case 'contact':
         return <ContactSection />;
       case 'upload':
-        return <UploadSection onUploadComplete={() => setAppState('processing')} />;
+        return (
+          <UploadSection
+            onPipelineStarted={(startedJobId, startedSessionId) => {
+              setJobId(startedJobId);
+              setSessionId(startedSessionId);
+              setAppState('processing');
+            }}
+            onUploadCompleteStub={() => setAppState('processing')}
+          />
+        );
       case 'processing':
-        return <ProcessingScreen onComplete={() => setAppState('simulation')} />;
+        return (
+          <ProcessingScreen
+            jobId={jobId}
+            onComplete={(completedSessionId) => {
+              if (completedSessionId) setSessionId(completedSessionId);
+              setAppState('simulation');
+            }}
+          />
+        );
       case 'simulation':
-        return <SimulationViewer />;
+        return <SimulationViewer sessionId={sessionId} />;
       default:
         return <HeroSection onStart={() => setAppState('upload')} />;
     }

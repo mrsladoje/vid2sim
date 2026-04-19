@@ -22,6 +22,7 @@ export class Physics {
   private gravityOverride: number | null = null;
   private frictionScale = 1;
   private readonly viewer: Viewer;
+  private dragBodyId: string | null = null;
 
   constructor(viewer: Viewer) {
     this.viewer = viewer;
@@ -200,7 +201,8 @@ export class Physics {
     if (!this.world || !this.rapier) return;
     const desc = this.rapier.RigidBodyDesc.dynamic()
       .setTranslation(worldPos.x, worldPos.y, worldPos.z)
-      .setLinvel(0, -0.5, 0);
+      .setLinvel(0, -0.5, 0)
+      .setCcdEnabled(true);
     const body = this.world.createRigidBody(desc);
     const col = this.rapier.ColliderDesc.ball(radius)
       .setFriction(0.5)
@@ -220,6 +222,36 @@ export class Physics {
     const body = this.objectBodies.get(id);
     if (!body) return;
     body.applyImpulse({ x: impulse.x, y: impulse.y, z: impulse.z }, true);
+  }
+
+  startDrag(id: string): number | null {
+    if (!this.rapier) return null;
+    const body = this.objectBodies.get(id);
+    if (!body || !body.isDynamic()) return null;
+    body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    body.setBodyType(this.rapier.RigidBodyType.KinematicPositionBased, true);
+    this.dragBodyId = id;
+    return body.translation().y;
+  }
+
+  moveDrag(id: string, target: THREE.Vector3): void {
+    const body = this.objectBodies.get(id);
+    if (!body || this.dragBodyId !== id || !body.isKinematic()) return;
+    body.setNextKinematicTranslation({ x: target.x, y: target.y, z: target.z });
+    body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  }
+
+  endDrag(id: string): void {
+    if (!this.rapier) return;
+    const body = this.objectBodies.get(id);
+    if (!body) return;
+    if (body.isKinematic()) {
+      body.setBodyType(this.rapier.RigidBodyType.Dynamic, true);
+    }
+    body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    if (this.dragBodyId === id) this.dragBodyId = null;
   }
 
   reset(): void {
@@ -251,6 +283,7 @@ export class Physics {
     }
     this.objectBodies.clear();
     this.bodyIdToObjectId.clear();
+    this.dragBodyId = null;
     for (const rec of this.viewer.objects.values()) {
       rec.bodyHandle = null;
     }

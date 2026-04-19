@@ -10,7 +10,8 @@ export interface ObjectRecord {
 const BG_COLOR = 0x0a0a0c;
 const FOG_NEAR = 14;
 const FOG_FAR = 48;
-const GROUND_HALF_SIZE = 30;
+const GROUND_SIZE = 30;
+const INTERACTION_HALF_EXTENT = GROUND_SIZE * 0.5;
 
 export class Viewer {
   readonly scene: THREE.Scene;
@@ -75,7 +76,7 @@ export class Viewer {
     rim.position.set(-5, 3, -4);
     this.scene.add(rim);
 
-    const groundGeo = new THREE.PlaneGeometry(GROUND_HALF_SIZE, GROUND_HALF_SIZE);
+    const groundGeo = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE);
     const groundMat = new THREE.MeshStandardMaterial({
       color: 0x14141a,
       roughness: 0.95,
@@ -219,8 +220,26 @@ export class Viewer {
     raycaster.setFromCamera(ndc, this.camera);
     const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -height);
     const hit = new THREE.Vector3();
-    if (raycaster.ray.intersectPlane(plane, hit)) return hit;
-    return null;
+    if (!raycaster.ray.intersectPlane(plane, hit)) return null;
+    if (
+      Math.abs(hit.x) > INTERACTION_HALF_EXTENT ||
+      Math.abs(hit.z) > INTERACTION_HALF_EXTENT
+    ) {
+      return null;
+    }
+    return hit;
+  }
+
+  surfaceIntersect(clientX: number, clientY: number): THREE.Intersection | null {
+    const ndc = new THREE.Vector2();
+    this.ndcFromPixel(clientX, clientY, ndc);
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(ndc, this.camera);
+    const targets: THREE.Object3D[] = [this.ground];
+    for (const rec of this.objects.values()) targets.push(rec.loaded.object3d);
+    const hits = raycaster.intersectObjects(targets, true);
+    if (hits.length === 0) return null;
+    return hits[0];
   }
 
   dispose(): void {

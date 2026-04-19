@@ -17,7 +17,20 @@ import {
 import { StatusRibbon, CornerMark } from './SectionChrome';
 
 interface UploadSectionProps {
-  onUploadComplete: () => void;
+  /**
+   * Fired when the live-capture path successfully kicks off a real
+   * pipeline run on the Python server. The processing screen polls
+   * `/pipeline/status/<jobId>` from here and hands `sessionId` forward to
+   * the viewer.
+   */
+  onPipelineStarted: (jobId: string, sessionId: string) => void;
+  /**
+   * Fallback path for the drag-and-drop tab where we don't actually run
+   * the pipeline (no video-to-bundle adapter exists yet); still flips the
+   * UI into the processing → simulation flow so the demo degrades
+   * gracefully.
+   */
+  onUploadCompleteStub: () => void;
 }
 
 type SourceMode = 'live' | 'upload';
@@ -91,7 +104,10 @@ function isOakDevice(label: string): boolean {
 }
 
 
-export default function UploadSection({ onUploadComplete }: UploadSectionProps) {
+export default function UploadSection({
+  onPipelineStarted,
+  onUploadCompleteStub,
+}: UploadSectionProps) {
   const [mode, setMode] = useState<SourceMode>('live');
 
   // --- upload tab state ---
@@ -530,22 +546,54 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
   }, [recordedUrl]);
 
   // ------------------------------------------------------------------
-  // Commit paths — both tabs reach the same `onUploadComplete()`.
+  // Commit paths.
+  //   - live capture: POST /pipeline/run to the Python job server which
+  //     runs Stream 01 (capture.py) → Stream 02 (reconstruct) → Stream 03
+  //     (assembler) end-to-end and writes a fresh scene.json.
+  //   - file upload: no video→bundle adapter yet, so we still flip the UI
+  //     into the processing flow and let it fall back to the cached scene.
   // ------------------------------------------------------------------
-  const commitLive = useCallback(() => {
+  const [pipelineKickError, setPipelineKickError] = useState<string | null>(null);
+  const [pipelineStarting, setPipelineStarting] = useState(false);
+
+  const commitLive = useCallback(async () => {
     if (!recordedBlob) return;
-    // Future: POST the blob to a pipeline endpoint. For now the static demo
-    // flow hands off to ProcessingScreen → SimulationViewer which loads
-    // Stream 03's assembled scene.json.
-    stopTickLoop();
-    stopStream();
-    onUploadComplete();
-  }, [onUploadComplete, recordedBlob, stopStream, stopTickLoop]);
+    setPipelineKickError(null);
+    setPipelineStarting(true);
+    try {
+      // Use the recorded clip length as the pipeline's capture duration so
+      // the user intuits "record 10s → capture 10s of real depth+RGB".
+      const durationMs = Math.max(3000, Math.min(elapsed || 10000, 30000));
+      const res = await fetch('http://127.0.0.1:8765/pipeline/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ duration_s: Math.round(durationMs / 1000) }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`HTTP ${res.status}: ${body}`);
+      }
+      const job = await res.json() as { job_id: string; session_id: string };
+      stopTickLoop();
+      stopStream();
+      onPipelineStarted(job.job_id, job.session_id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[UploadSection] pipeline kickoff failed', err);
+      setPipelineKickError(
+        `Could not start pipeline: ${msg}. Check the terminal for [oak-uvc] errors.`,
+      );
+    } finally {
+      setPipelineStarting(false);
+    }
+  }, [elapsed, onPipelineStarted, recordedBlob, stopStream, stopTickLoop]);
 
   const commitUpload = useCallback(() => {
     if (!file) return;
-    onUploadComplete();
-  }, [file, onUploadComplete]);
+    // Uploaded videos don't carry depth/IMU, so we can't feed them into
+    // Stream 01's bundler. Hand off to the stub processing flow.
+    onUploadCompleteStub();
+  }, [file, onUploadCompleteStub]);
 
   // ------------------------------------------------------------------
   // Drag & drop handlers (unchanged behavior, kept behind the Upload tab).
@@ -841,21 +889,31 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
                         re-record
                       </motion.button>
                       <motion.button
-                        whileHover={{
+                        whileHover={pipelineStarting ? undefined : {
                           scale: 1.05,
                           boxShadow: '0 0 20px rgba(228,107,69,0.3)',
                         }}
-                        whileTap={{ scale: 0.95 }}
+                        whileTap={pipelineStarting ? undefined : { scale: 0.95 }}
                         onClick={commitLive}
-                        className="primary-button-solid text-xs px-4 py-2 font-mono flex items-center gap-2"
+                        disabled={pipelineStarting}
+                        className="primary-button-solid text-xs px-4 py-2 font-mono flex items-center gap-2 disabled:opacity-60 disabled:cursor-wait"
                       >
-                        <span className="opacity-70">./</span>process_capture
+                        <span className="opacity-70">./</span>
+                        {pipelineStarting ? 'starting_pipeline…' : 'process_capture'}
                         <ArrowRight className="w-3.5 h-3.5" />
                       </motion.button>
                     </>
                   )}
                 </div>
               </div>
+
+              {/* Pipeline kickoff error */}
+              {pipelineKickError && (
+                <div className="flex items-start gap-2 px-4 py-2 border-t border-border/60 bg-red-500/10 text-[11px] font-mono text-red-200">
+                  <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5 text-red-400" />
+                  <span className="leading-relaxed">{pipelineKickError}</span>
+                </div>
+              )}
 
               {/* OAK-not-found hint */}
               {oakHint && liveState !== 'error' && (

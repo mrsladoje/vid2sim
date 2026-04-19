@@ -43,8 +43,9 @@ const MODE_OPTIONS: {
   { value: 'apply_force', label: 'Force', hint: 'drag to push', icon: Zap, shortcut: '4' },
 ];
 
-const DRAG_HEIGHT = 1.2;
-const DEFAULT_SCENE_JSON_URL = '/scenes/rec_01_sf3d_assembled/scene.json';
+const BALL_RADIUS = 0.08;
+const BALL_SPAWN_OFFSET = BALL_RADIUS + 0.02;
+const CACHED_SCENE_JSON_URL = '/scenes/rec_01_sf3d_assembled/scene.json';
 const DEFAULT_RECONSTRUCTED_URL = '/scenes/rec_01_sf3d/reconstructed.json';
 
 /**
@@ -66,28 +67,45 @@ async function probeManifest(url: string): Promise<boolean> {
 }
 
 /**
- * Three-tier source resolution:
- *   1. Stream 03 assembled scene  (scene.json + per-object meshes/<id>.glb)
- *   2. Stream 02 raw reconstruction (reconstructed.json + per-object mesh.glb)
- *   3. Synthetic demo fallback with "demo data" badge
- *
- * We deliberately never point at the composed scene.glb — loading that
- * monolith would produce one Object3D and break per-object physics.
+ * Source resolution:
+ *   1. If a live pipeline ran, load its fresh scene.json at
+ *      /scenes/<sessionId>_assembled/scene.json. Never falls back on 404
+ *      for a live session — the user should see the error, not a stale
+ *      cached scene.
+ *   2. Otherwise, prefer the cached Stream 03 scene (rec_01_sf3d_assembled)
+ *      → Stream 02 raw reconstruction → synthetic demo with badge.
  */
-async function resolvePrimarySource(): Promise<{ source: SceneSource; tier: 'scene' | 'recon' | 'demo' }> {
-  if (await probeManifest(DEFAULT_SCENE_JSON_URL)) {
+async function resolvePrimarySource(sessionId: string | null): Promise<{
+  source: SceneSource;
+  tier: 'live' | 'scene' | 'recon' | 'demo';
+  sceneUrl: string | null;
+}> {
+  if (sessionId) {
+    const liveUrl = `/scenes/${sessionId}_assembled/scene.json`;
     return {
-      source: new SceneJsonSource({ manifestUrl: DEFAULT_SCENE_JSON_URL }),
+      source: new SceneJsonSource({
+        manifestUrl: liveUrl,
+        displayName: `Live · ${sessionId}`,
+      }),
+      tier: 'live',
+      sceneUrl: liveUrl,
+    };
+  }
+  if (await probeManifest(CACHED_SCENE_JSON_URL)) {
+    return {
+      source: new SceneJsonSource({ manifestUrl: CACHED_SCENE_JSON_URL }),
       tier: 'scene',
+      sceneUrl: CACHED_SCENE_JSON_URL,
     };
   }
   if (await probeManifest(DEFAULT_RECONSTRUCTED_URL)) {
     return {
       source: new ReconstructedJsonSource({ manifestUrl: DEFAULT_RECONSTRUCTED_URL }),
       tier: 'recon',
+      sceneUrl: DEFAULT_RECONSTRUCTED_URL,
     };
   }
-  return { source: new ExampleSceneSource(undefined, true), tier: 'demo' };
+  return { source: new ExampleSceneSource(undefined, true), tier: 'demo', sceneUrl: null };
 }
 
 interface SelectedInfo {
@@ -123,7 +141,16 @@ function toSelectedInfo(m: LoadedMesh): SelectedInfo {
   };
 }
 
-export default function SimulationViewer() {
+interface SimulationViewerProps {
+  /**
+   * Optional session id from a fresh pipeline run. When present the viewer
+   * loads /scenes/<sessionId>_assembled/scene.json; when null it falls
+   * back through the cached scene → raw reconstruction → demo chain.
+   */
+  sessionId?: string | null;
+}
+
+export default function SimulationViewer({ sessionId = null }: SimulationViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Viewer | null>(null);
@@ -161,11 +188,15 @@ export default function SimulationViewer() {
       await physics.init();
       if (disposed) return;
 
-      const resolved = await resolvePrimarySource();
+      const resolved = await resolvePrimarySource(sessionId);
       let source: SceneSource = resolved.source;
-      if (resolved.tier !== 'scene') {
+      if (resolved.tier === 'live') {
         console.info(
-          `[SimulationViewer] using tier=${resolved.tier} (scene.json unavailable at ${DEFAULT_SCENE_JSON_URL})`,
+          `[SimulationViewer] live session ${sessionId} → ${resolved.sceneUrl}`,
+        );
+      } else if (resolved.tier !== 'scene') {
+        console.info(
+          `[SimulationViewer] using tier=${resolved.tier} (cached scene unavailable)`,
         );
       }
 
@@ -221,7 +252,10 @@ export default function SimulationViewer() {
       viewerRef.current = null;
       physicsRef.current = null;
     };
-  }, []);
+    // Re-run when the live pipeline hands off a new sessionId so the fresh
+    // scene replaces the cached one in-place.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -241,6 +275,7 @@ export default function SimulationViewer() {
     applyOrbit();
 
     let dragId: string | null = null;
+    let dragPlaneHeight: number | null = null;
     let forceStart: { x: number; y: number; id: string } | null = null;
 
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
@@ -279,12 +314,19 @@ export default function SimulationViewer() {
       } else if (m === 'drag') {
         const rec = viewer.pick(e.clientX, e.clientY);
         if (rec) {
+          const planeHeight = physics.startDrag(rec.id);
+          if (planeHeight === null) return;
           dragId = rec.id;
+          dragPlaneHeight = planeHeight;
           handlePickForInspector(rec);
         }
       } else if (m === 'drop_ball') {
-        const hit = viewer.planeIntersect(e.clientX, e.clientY, DRAG_HEIGHT);
-        if (hit) physics.dropBall(hit);
+        const hit = viewer.surfaceIntersect(e.clientX, e.clientY);
+        if (hit) {
+          const spawn = hit.point.clone();
+          spawn.y += BALL_SPAWN_OFFSET;
+          physics.dropBall(spawn, BALL_RADIUS);
+        }
       } else if (m === 'apply_force') {
         const rec = viewer.pick(e.clientX, e.clientY);
         if (rec) {
@@ -307,13 +349,10 @@ export default function SimulationViewer() {
         applyOrbit();
         return;
       }
-      if (modeRef.current === 'drag' && dragId) {
-        const hit = viewer.planeIntersect(e.clientX, e.clientY, DRAG_HEIGHT);
+      if (modeRef.current === 'drag' && dragId && dragPlaneHeight !== null) {
+        const hit = viewer.planeIntersect(e.clientX, e.clientY, dragPlaneHeight);
         if (!hit) return;
-        const body = physics.getBodyFor(dragId);
-        if (!body) return;
-        body.setTranslation({ x: hit.x, y: hit.y, z: hit.z }, true);
-        body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        physics.moveDrag(dragId, hit);
       }
     };
 
@@ -325,9 +364,9 @@ export default function SimulationViewer() {
       if (e.button !== 0) return;
 
       if (modeRef.current === 'drag' && dragId) {
-        const body = physics.getBodyFor(dragId);
-        if (body) body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        physics.endDrag(dragId);
         dragId = null;
+        dragPlaneHeight = null;
       }
       if (modeRef.current === 'apply_force' && forceStart) {
         const dx = e.clientX - forceStart.x;

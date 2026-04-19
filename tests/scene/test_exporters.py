@@ -110,3 +110,50 @@ def test_gltf_per_object_textures_survive(built_scene):
             if name.startswith(oid + "_"):
                 seen[oid] = True
     assert all(seen.values()), f"missing per-object meshes: {seen}"
+
+
+def test_gltf_preserves_staged_object_size(built_scene):
+    """Regression: the gltf exporter must compose the staged GLB's *node
+    transforms* with the object transform. Without this, the inner Trimesh's
+    raw vertices land at the object translation at their unstaged size — a
+    1 m SF3D-normalized mesh ends up placed where a 10 cm object should be,
+    causing the bottle/cup overlap that ships in screenshots like
+    https://github.com/issues/<...>."""
+    import numpy as np
+    scene, out = built_scene
+    res = export_gltf(scene, session_dir=out, out_dir=out)
+
+    composed = trimesh.load(res.scene_glb)
+
+    # Compute, for each scene object, the world-space AABB of its contribution
+    # to the composed scene. It should match the staged GLB's bounds shifted
+    # to that object's transform.translation.
+    for obj in scene["objects"]:
+        staged = trimesh.load(out / obj["mesh"])
+        staged_extents = staged.extents
+
+        node_extents = []
+        for node_name in composed.graph.nodes_geometry:
+            if not node_name.startswith(obj["id"] + "_"):
+                continue
+            transform, geom_name = composed.graph[node_name]
+            geom = composed.geometry[geom_name]
+            # Apply the node transform to the geom's local AABB corners.
+            lo, hi = geom.bounds
+            corners = np.array([
+                [lo[0], lo[1], lo[2]], [lo[0], lo[1], hi[2]],
+                [lo[0], hi[1], lo[2]], [lo[0], hi[1], hi[2]],
+                [hi[0], lo[1], lo[2]], [hi[0], lo[1], hi[2]],
+                [hi[0], hi[1], lo[2]], [hi[0], hi[1], hi[2]],
+            ])
+            world = (np.asarray(transform)[:3, :3] @ corners.T).T \
+                    + np.asarray(transform)[:3, 3]
+            node_extents.append(world.max(axis=0) - world.min(axis=0))
+        assert node_extents, f"no nodes for {obj['id']} in composed scene"
+        # Each node's effective extent must be ≤ the staged extent (a Scene
+        # may split into multiple sub-meshes), and the union must match.
+        union = np.max(node_extents, axis=0)
+        assert np.allclose(union, staged_extents, atol=1e-3), (
+            f"composed extent for {obj['id']} = {union.tolist()} but staged "
+            f"GLB extent = {staged_extents.tolist()}"
+        )

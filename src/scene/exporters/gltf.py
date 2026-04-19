@@ -63,14 +63,21 @@ def export_gltf(scene: dict, session_dir: Path, out_dir: Path) -> GLTFResult:
             sub_scene = trimesh.Scene(loaded)
         else:
             sub_scene = loaded
-        tr = _transform_matrix(obj["transform"])
-        for inner_name, geom in sub_scene.geometry.items():
-            node_name = f"{obj['id']}_{inner_name}"
+        obj_tr = _transform_matrix(obj["transform"])
+        # Compose each source node's transform with our object transform,
+        # otherwise the staged GLB's node-level scaling/centering is lost
+        # and the inner Trimesh's raw (model-normalized) vertices end up
+        # placed at the object translation — making everything the size
+        # of the original SF3D output instead of the class-prior size.
+        for src_node in sub_scene.graph.nodes_geometry:
+            src_transform, geom_name = sub_scene.graph[src_node]
+            geom = sub_scene.geometry[geom_name]
+            composed = obj_tr @ np.asarray(src_transform)
             tscene.add_geometry(
                 geom,
-                node_name=node_name,
-                geom_name=node_name,
-                transform=tr,
+                node_name=f"{obj['id']}_{src_node}",
+                geom_name=f"{obj['id']}_{src_node}",
+                transform=composed,
             )
 
     ground_mesh = _ground_quad(scene["ground"], size=GROUND_SIZE_M)

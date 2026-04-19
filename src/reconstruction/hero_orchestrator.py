@@ -41,7 +41,7 @@ from PIL import Image
 from .backproject import Intrinsics, backproject, load_intrinsics, pose_from_pose_json
 from .decimate import decimate_mesh
 from .fusion import FusionConfig, FusionResult, fuse_depth
-from .icp_align import AlignConfig, AlignResult, align, apply_similarity
+from .icp_align import AlignConfig, AlignResult, align
 from .runpod_client import MeshCall, RunPodClient
 from .vio import WorldPose, world_pose
 
@@ -122,18 +122,42 @@ def _mask_png(mask: np.ndarray, bbox2d: list[float]) -> bytes:
     return buf.getvalue()
 
 
-def _glb_to_trimesh(glb_bytes: bytes) -> trimesh.Trimesh:
-    scene = trimesh.load(io.BytesIO(glb_bytes), file_type="glb", force="mesh")
-    if isinstance(scene, trimesh.Scene):
-        geoms = list(scene.geometry.values())
-        if not geoms:
+def _glb_to_scene(glb_bytes: bytes) -> trimesh.Scene:
+    """Parse a GLB and return a Scene, preserving textures/materials.
+
+    SF3D ships a UV-mapped textured mesh inside a Scene. Previously we
+    called ``trimesh.load(..., force='mesh')`` which collapses Scene →
+    single Trimesh (one uniform material), destroying the texture atlas
+    at load time. Keep the Scene intact so ``scene.apply_transform(...)``
+    + ``scene.export('glb')`` carry the baked texture end-to-end.
+
+    Stub fallback (12-byte dummy glb) parses to a Trimesh; we wrap it in
+    a Scene so the rest of the pipeline has a uniform interface.
+    """
+    loaded = trimesh.load(io.BytesIO(glb_bytes), file_type="glb")
+    if isinstance(loaded, trimesh.Scene):
+        if not loaded.geometry:
             raise ValueError("glb scene had no geometry")
-        mesh = trimesh.util.concatenate(geoms)
-    else:
-        mesh = scene
-    if not isinstance(mesh, trimesh.Trimesh):
-        raise TypeError(f"glb did not parse to a Trimesh: got {type(mesh)}")
-    return mesh
+        return loaded
+    if isinstance(loaded, trimesh.Trimesh):
+        return trimesh.Scene(geometry={"mesh": loaded})
+    raise TypeError(f"glb did not parse to a Scene or Trimesh: got {type(loaded)}")
+
+
+def _scene_vertex_cloud(scene: trimesh.Scene) -> np.ndarray:
+    """Return all vertices concatenated into one (N, 3) array for ICP.
+
+    ``scene.dump(concatenate=True)`` returns a flattened Trimesh we can
+    throw away after reading ``.vertices`` — the original Scene is not
+    mutated, so materials remain intact on export.
+    """
+    flat = scene.dump(concatenate=True)
+    return np.asarray(flat.vertices)
+
+
+def _scene_total_faces(scene: trimesh.Scene) -> int:
+    return sum(len(g.faces) for g in scene.geometry.values()
+               if hasattr(g, "faces"))
 
 
 def _rotation_to_quat(r: np.ndarray) -> tuple[float, float, float, float]:
@@ -255,20 +279,26 @@ def reconstruct_one_object(
                                        model=cfg.primary_model)
     t_gen_total = time.monotonic() - t_gen_start
 
-    # --- load + align + decimate ---
+    # --- load + align + (skip) decimate ---
+    # Keep the SF3D-baked Scene (textures + UVs) intact through the
+    # whole pipeline. Apply ICP via scene.apply_transform(T4x4) so
+    # per-primitive materials are preserved on export.
     try:
-        raw = _glb_to_trimesh(call.glb_bytes)
+        raw_scene = _glb_to_scene(call.glb_bytes)
     except Exception as exc:  # noqa: BLE001
         # Stub payload is a 12-byte dummy glb — fall through with a
         # primitive cube so the downstream pipeline stays honest and
         # Person 3 gets *something* to assemble.
         logger.warning("glb unreadable (%s); substituting unit cube", exc)
-        raw = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        raw_scene = trimesh.Scene(
+            geometry={"mesh": trimesh.creation.box(extents=(1.0, 1.0, 1.0))}
+        )
+
+    raw_vertices = _scene_vertex_cloud(raw_scene)
 
     t_align_start = time.monotonic()
     if cloud.shape[0] >= 8:
-        result: AlignResult = align(np.asarray(raw.vertices), cloud,
-                                    cfg=cfg.align)
+        result: AlignResult = align(raw_vertices, cloud, cfg=cfg.align)
     else:
         # Not enough observed points — bbox-centred identity pose, flag
         # in provenance.
@@ -276,24 +306,47 @@ def reconstruct_one_object(
             scale=1.0, rotation=np.eye(3), translation=np.zeros(3),
             residual=float("inf"), iterations=0, azimuth_deg=0.0,
         )
-    aligned_verts = apply_similarity(np.asarray(raw.vertices), result)
-    aligned = trimesh.Trimesh(vertices=aligned_verts, faces=raw.faces,
-                              process=False)
+    # Build a 4x4 similarity from (scale, R, t) and apply it to the
+    # whole scene. trimesh's Scene.apply_transform walks the scene graph
+    # and transforms each primitive's geometry in place, leaving
+    # visual.material untouched.
+    T4 = np.eye(4, dtype=np.float64)
+    T4[:3, :3] = float(result.scale) * np.asarray(result.rotation, dtype=np.float64)
+    T4[:3, 3] = np.asarray(result.translation, dtype=np.float64)
+    aligned_scene = raw_scene.copy()
+    aligned_scene.apply_transform(T4)
     t_align = time.monotonic() - t_align_start
 
-    decimated, (in_tris, out_tris) = decimate_mesh(aligned, max_tris=cfg.max_tris)
+    # Decimation strips UVs / textures in trimesh's quadric path. SF3D
+    # ships meshes well under cfg.max_tris already (~14 K faces), so we
+    # only invoke decimation on the rare oversize mesh, and accept the
+    # texture loss in that path with a warning.
+    in_tris = _scene_total_faces(aligned_scene)
+    out_tris = in_tris
+    if in_tris > cfg.max_tris:
+        logger.warning(
+            "mesh has %d faces > cap %d — decimating (textures will be "
+            "stripped). Consider raising max_tris if this is SF3D output.",
+            in_tris, cfg.max_tris,
+        )
+        flat = aligned_scene.dump(concatenate=True)
+        decimated_flat, (in_tris, out_tris) = decimate_mesh(
+            flat, max_tris=cfg.max_tris,
+        )
+        aligned_scene = trimesh.Scene(geometry={"mesh": decimated_flat})
 
     # --- write artifacts ---
     obj_dir = (cfg.out_root / session_id / "objects" /
                f"{track_id}_{class_name}")
     obj_dir.mkdir(parents=True, exist_ok=True)
     glb_buf = io.BytesIO()
-    decimated.export(glb_buf, file_type="glb")
+    aligned_scene.export(glb_buf, file_type="glb")
     (obj_dir / "mesh.glb").write_bytes(glb_buf.getvalue())
     (obj_dir / "crop.jpg").write_bytes(crop_jpeg)
 
-    bbox_min = decimated.vertices.min(axis=0).tolist()
-    bbox_max = decimated.vertices.max(axis=0).tolist()
+    aligned_bounds = aligned_scene.bounds  # (2, 3) min / max, all geoms
+    bbox_min = aligned_bounds[0].tolist()
+    bbox_max = aligned_bounds[1].tolist()
     center = ((np.asarray(bbox_min) + np.asarray(bbox_max)) / 2.0).tolist()
     rot_quat = _rotation_to_quat(result.rotation)
 

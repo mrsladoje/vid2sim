@@ -224,6 +224,16 @@ export class Physics {
     body.applyImpulse({ x: impulse.x, y: impulse.y, z: impulse.z }, true);
   }
 
+  applyImpulseAtPoint(id: string, impulse: THREE.Vector3, point: THREE.Vector3): void {
+    const body = this.objectBodies.get(id);
+    if (!body) return;
+    body.applyImpulseAtPoint(
+      { x: impulse.x, y: impulse.y, z: impulse.z },
+      { x: point.x, y: point.y, z: point.z },
+      true,
+    );
+  }
+
   startDrag(id: string): number | null {
     if (!this.rapier) return null;
     const body = this.objectBodies.get(id);

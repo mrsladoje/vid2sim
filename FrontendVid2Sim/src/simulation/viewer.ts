@@ -7,6 +7,11 @@ export interface ObjectRecord {
   bodyHandle: number | null;
 }
 
+export interface PickHit {
+  record: ObjectRecord;
+  point: THREE.Vector3;
+}
+
 const BG_COLOR = 0x0a0a0c;
 const FOG_NEAR = 14;
 const FOG_FAR = 48;
@@ -200,6 +205,10 @@ export class Viewer {
   }
 
   pick(clientX: number, clientY: number): ObjectRecord | null {
+    return this.pickHit(clientX, clientY)?.record ?? null;
+  }
+
+  pickHit(clientX: number, clientY: number): PickHit | null {
     const ndc = new THREE.Vector2();
     this.ndcFromPixel(clientX, clientY, ndc);
     const raycaster = new THREE.Raycaster();
@@ -210,7 +219,9 @@ export class Viewer {
     if (hits.length === 0) return null;
     const id = hits[0].object.userData.objectId as string | undefined;
     if (!id) return null;
-    return this.objects.get(id) ?? null;
+    const record = this.objects.get(id);
+    if (!record) return null;
+    return { record, point: hits[0].point.clone() };
   }
 
   planeIntersect(clientX: number, clientY: number, height: number): THREE.Vector3 | null {

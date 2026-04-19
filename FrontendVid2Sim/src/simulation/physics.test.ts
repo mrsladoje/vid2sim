@@ -46,6 +46,24 @@ describe('Physics drag controls', () => {
     expect(physics.startDrag('table_01')).toBeNull();
     expect(physics.getBodyFor('table_01')?.isFixed()).toBe(true);
   });
+
+  it('applies off-center impulses at the picked point', async () => {
+    const mesh = makeLoadedMesh('crate_01', new THREE.Vector3(0, 0.6, 0));
+    const viewer = makeViewer([mesh]);
+    const physics = new Physics(viewer);
+    await physics.init();
+    physics.buildWorld(makeScene([mesh]));
+
+    const body = physics.getBodyFor('crate_01')!;
+    physics.applyImpulseAtPoint(
+      'crate_01',
+      new THREE.Vector3(0, 0, 3),
+      new THREE.Vector3(0.15, 0.6, 0),
+    );
+    physics.step(1 / 60);
+
+    expect(Math.abs(body.angvel().y)).toBeGreaterThan(0);
+  });
 });
 
 function makeLoadedMesh(

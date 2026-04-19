@@ -276,7 +276,7 @@ export default function SimulationViewer({ sessionId = null }: SimulationViewerP
 
     let dragId: string | null = null;
     let dragPlaneHeight: number | null = null;
-    let forceStart: { x: number; y: number; id: string } | null = null;
+    let forceStart: { x: number; y: number; id: string; point: THREE.Vector3 } | null = null;
 
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
     const onWheel = (e: WheelEvent) => {
@@ -328,10 +328,15 @@ export default function SimulationViewer({ sessionId = null }: SimulationViewerP
           physics.dropBall(spawn, BALL_RADIUS);
         }
       } else if (m === 'apply_force') {
-        const rec = viewer.pick(e.clientX, e.clientY);
-        if (rec) {
-          forceStart = { x: e.clientX, y: e.clientY, id: rec.id };
-          handlePickForInspector(rec);
+        const hit = viewer.pickHit(e.clientX, e.clientY);
+        if (hit) {
+          forceStart = {
+            x: e.clientX,
+            y: e.clientY,
+            id: hit.record.id,
+            point: hit.point,
+          };
+          handlePickForInspector(hit.record);
         }
       }
     };
@@ -378,7 +383,7 @@ export default function SimulationViewer({ sessionId = null }: SimulationViewerP
         const impulse = new THREE.Vector3()
           .addScaledVector(right, dx * scale)
           .addScaledVector(up, -dy * scale);
-        physics.applyImpulse(forceStart.id, impulse);
+        physics.applyImpulseAtPoint(forceStart.id, impulse, forceStart.point);
         forceStart = null;
       }
     };

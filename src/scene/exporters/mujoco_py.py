@@ -21,7 +21,7 @@ from pathlib import Path
 import mujoco
 
 
-SCENE_XML = Path(__file__).with_name("scene.xml")
+SCENE_XML = Path(__file__).with_name("scene.mjcf")
 
 
 def run(steps: int = {steps}) -> None:

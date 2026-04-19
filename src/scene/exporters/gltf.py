@@ -1,12 +1,23 @@
 """glTF + sidecar physics JSON exporter (primary).
 
-Per ADR: `KHR_physics_rigid_bodies` is still unratified, so we keep
-physics in a `scene.glb.physics.json` sidecar file. The sidecar is
+Per ADR: ``KHR_physics_rigid_bodies`` is still unratified, so we keep
+physics in a ``scene.glb.physics.json`` sidecar file. The sidecar is
 indexed by scene-object id so the viewer can look it up after loading
 the glTF.
 
-This exporter concatenates every object's glTF into a single `scene.glb`
-using trimesh's Scene. The ground plane is added as a large flat quad.
+This exporter composes every object's mesh into a single ``trimesh.Scene``
+and writes it out twice:
+
+* ``scene.gltf`` (+ ``.bin`` companions) — JSON glTF, three.js loader
+  opens it directly via ``GLTFLoader.load('scene.gltf')``.
+* ``scene.glb`` — single-file binary glTF for drag-and-drop viewers.
+
+**Texture preservation is mandatory.** SF3D output meshes carry baked
+1024×1024 PBR atlases inside an inner ``trimesh.Scene``. Any call to
+``trimesh.load(..., force="mesh")`` collapses the Scene → single
+Trimesh and silently drops materials. We therefore load each object as
+a Scene and add its inner geometries (with PBR materials intact) into
+the parent Scene under named nodes.
 """
 
 from __future__ import annotations
@@ -20,27 +31,53 @@ import trimesh
 
 
 GROUND_SIZE_M = 10.0
+# Light, neutral grey for the ground quad so it doesn't compete with the
+# textured objects in the viewer.
+GROUND_COLOR_RGBA = (200, 200, 200, 255)
 
 
 @dataclass(frozen=True)
 class GLTFResult:
+    scene_gltf: Path
     scene_glb: Path
     sidecar: Path
 
 
 def export_gltf(scene: dict, session_dir: Path, out_dir: Path) -> GLTFResult:
-    """Concatenate object meshes + ground into `scene.glb`; write sidecar."""
+    """Compose object meshes + ground into a glTF scene.
+
+    ``session_dir`` is the directory that contains the per-object meshes
+    referenced by ``scene["objects"][i]["mesh"]`` (relative paths). For an
+    in-place build (the assembler's normal mode) this is the same as
+    ``out_dir``.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     tscene = trimesh.Scene()
 
     for obj in scene["objects"]:
-        mesh = trimesh.load(session_dir / obj["mesh"], force="mesh")
+        mesh_path = session_dir / obj["mesh"]
+        loaded = trimesh.load(mesh_path)
+        # Always treat as a Scene so PBR materials survive — see module
+        # docstring for the textures-are-load-bearing rationale.
+        if isinstance(loaded, trimesh.Trimesh):
+            sub_scene = trimesh.Scene(loaded)
+        else:
+            sub_scene = loaded
         tr = _transform_matrix(obj["transform"])
-        tscene.add_geometry(mesh, node_name=obj["id"], transform=tr)
+        for inner_name, geom in sub_scene.geometry.items():
+            node_name = f"{obj['id']}_{inner_name}"
+            tscene.add_geometry(
+                geom,
+                node_name=node_name,
+                geom_name=node_name,
+                transform=tr,
+            )
 
     ground_mesh = _ground_quad(scene["ground"], size=GROUND_SIZE_M)
-    tscene.add_geometry(ground_mesh, node_name="ground")
+    tscene.add_geometry(ground_mesh, node_name="ground", geom_name="ground")
 
+    scene_gltf = out_dir / "scene.gltf"
+    tscene.export(scene_gltf)
     scene_glb = out_dir / "scene.glb"
     tscene.export(scene_glb)
 
@@ -63,11 +100,10 @@ def export_gltf(scene: dict, session_dir: Path, out_dir: Path) -> GLTFResult:
     with sidecar.open("w") as fh:
         json.dump(payload, fh, indent=2)
 
-    return GLTFResult(scene_glb=scene_glb, sidecar=sidecar)
+    return GLTFResult(scene_gltf=scene_gltf, scene_glb=scene_glb, sidecar=sidecar)
 
 
 def _transform_matrix(t: dict) -> np.ndarray:
-    import numpy as np
     tx, ty, tz = t["translation"]
     qx, qy, qz, qw = t["rotation_quat"]
     s = float(t.get("scale", 1.0))
@@ -105,4 +141,12 @@ def _ground_quad(ground: dict, size: float) -> trimesh.Trimesh:
     ])
     faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
     mesh = trimesh.Trimesh(vertices=corners, faces=faces, process=False)
+    # Give the ground a PBR material so it renders in shaded viewers.
+    mesh.visual = trimesh.visual.TextureVisuals(
+        material=trimesh.visual.material.PBRMaterial(
+            baseColorFactor=GROUND_COLOR_RGBA,
+            roughnessFactor=0.9,
+            metallicFactor=0.0,
+        )
+    )
     return mesh

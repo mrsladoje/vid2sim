@@ -137,7 +137,7 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
         setOakHint(null);
       } else if (videoInputs.length > 0) {
         setOakHint(
-          'OAK-4 not detected as a UVC webcam. Flash the OAK UVC firmware (see Luxonis docs) or pick another device.',
+          'OAK not visible to the browser. OAKs need a UVC pipeline active on the host before getUserMedia() can see them. Run "python scripts/oak_uvc.py" in a terminal (OAK-4/RVC4: "oakctl app run ./uvc_app" — see scripts/README.md), then refresh.',
         );
       }
       return videoInputs;

@@ -52,6 +52,22 @@ implementation next to `reconstructedSource.ts` (e.g. `sceneJsonSource.ts` for
 Stream 03's `scene.gltf`) and `SimulationViewer.tsx` can select it without
 touching `viewer.ts` or `physics.ts`.
 
+## Using the OAK camera for live capture
+
+The live-capture tab auto-selects an OAK camera when one is detectable over
+UVC, but OAKs do NOT expose themselves as UVC webcams by default — they need
+a host-side pipeline to activate the UVC node. Start it before recording:
+
+```bash
+pip install depthai                  # one-time
+python scripts/oak_uvc.py            # keep running
+```
+
+Then refresh the frontend; the OAK appears in the camera picker and the
+live-capture tab auto-selects it (matches labels containing `oak`, `luxonis`,
+or `depthai`). For OAK-4 / RVC4 use the v3 `oakctl app run ./uvc_app` path —
+see [`scripts/README.md`](scripts/README.md) for details.
+
 ---
 
 # React + TypeScript + Vite

@@ -99,7 +99,7 @@ describe('SceneJsonSource', () => {
 
     expect(scene.meshes).toHaveLength(2);
     expect(scene.isFallback).toBe(false);
-    expect(scene.groundY).toBe(0); // assembler already snap-to-ground'd (Bug 4 safe)
+    expect(scene.groundY).toBe(0); // near-zero offsets stay pinned to the authored plane
     expect(scene.gravityY).toBeCloseTo(-9.81, 2);
 
     const bottle = scene.meshes[0];
@@ -215,5 +215,32 @@ describe('SceneJsonSource', () => {
   it('resolveBaseUrl trims filename', () => {
     const base = resolveBaseUrl('http://x/scenes/rec_01_sf3d_assembled/scene.json');
     expect(base).toBe('http://x/scenes/rec_01_sf3d_assembled/');
+  });
+
+  it('falls back to bbox-derived groundY when assembled objects are buried below zero', async () => {
+    const buried: SceneSpec = {
+      ...ASSEMBLED_FIXTURE,
+      objects: [
+        {
+          ...ASSEMBLED_FIXTURE.objects[0],
+          transform: {
+            ...ASSEMBLED_FIXTURE.objects[0].transform,
+            translation: [0.146, -0.438, 0.672],
+          },
+        },
+      ],
+    };
+    const fetchImpl = vi.fn(async () => makeJsonResponse(buried));
+    const loader = makeFakeLoader();
+    const source = new SceneJsonSource({
+      manifestUrl: 'http://localhost/buried/scene.json',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      gltfLoader: loader,
+    });
+
+    const scene = await source.load();
+
+    expect(scene.groundY).toBeCloseTo(-0.443, 3);
+    expect(scene.cameraHint?.target[1]).toBeGreaterThan(scene.groundY);
   });
 });

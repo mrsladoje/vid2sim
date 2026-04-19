@@ -30,8 +30,9 @@ export interface SceneJsonSourceOptions {
  *     staged transform. We never load the composed `scene.glb` monolith —
  *     that would weld everything into one Object3D and foreclose per-object
  *     physics.
- *   - Bug 4 (floating / below-ground): Stream 03 already ran snap_to_ground,
- *     so groundY = 0 matches the authored scene frame.
+ *   - Bug 4 (floating / below-ground): Stream 03 is supposed to snap meshes to
+ *     ground. In practice some live sessions still arrive offset vertically, so
+ *     we derive a fallback groundY from the loaded mesh bounds when needed.
  *
  * One LoadedMesh per scene object → one Rapier rigid body per object in
  * physics.ts. No monolithic bodies.
@@ -66,13 +67,15 @@ export class SceneJsonSource implements SceneSource {
       );
     }
 
+    const groundY = deriveGroundY(meshes, this.manifestUrl);
+
     return {
       displayName: this.displayName,
       meshes,
-      groundY: 0,
+      groundY,
       gravityY: manifest.world?.gravity?.[1] ?? -9.81,
       groundMaterial: manifest.ground?.material ?? { friction: 0.85, restitution: 0.1 },
-      cameraHint: framingHint(meshes),
+      cameraHint: framingHint(meshes, groundY),
       isFallback: false,
     };
   }
@@ -207,7 +210,7 @@ export function resolveBaseUrl(manifestUrl: string): string {
   }
 }
 
-function framingHint(meshes: LoadedMesh[]): LoadedScene["cameraHint"] {
+function framingHint(meshes: LoadedMesh[], groundY: number): LoadedScene["cameraHint"] {
   if (meshes.length === 0) {
     return { position: [1.2, 0.8, 1.2], target: [0, 0.1, 0] };
   }
@@ -219,8 +222,23 @@ function framingHint(meshes: LoadedMesh[]): LoadedScene["cameraHint"] {
   const back = Math.max(diag * 2.5, 0.6);
   return {
     position: [center.x + back * 0.6, center.y + back * 0.9, center.z + back],
-    target: [center.x, Math.max(center.y, 0.05), center.z],
+    target: [center.x, Math.max(center.y, groundY + 0.05), center.z],
   };
+}
+
+function deriveGroundY(meshes: LoadedMesh[], source: string): number {
+  if (meshes.length === 0) return 0;
+  let minY = Number.POSITIVE_INFINITY;
+  for (const mesh of meshes) {
+    minY = Math.min(minY, mesh.bboxWorld.min.y);
+  }
+  if (!Number.isFinite(minY)) return 0;
+  if (minY >= -0.05) return 0;
+  console.warn(
+    "[SceneJsonSource] scene appears vertically offset; using bbox-derived groundY fallback",
+    { source, derivedGroundY: minY },
+  );
+  return minY;
 }
 
 function prettyLabel(cls: string): string {

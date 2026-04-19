@@ -714,14 +714,20 @@ export default function UploadSection({
                 />
                 {/* Playback of the recorded clip */}
                 {isReview && recordedUrl && (
-                  <video
-                    ref={playbackRef}
-                    key={recordedUrl}
-                    src={recordedUrl}
-                    className="absolute inset-0 w-full h-full object-cover"
-                    controls
-                    playsInline
-                  />
+                  <>
+                    <video
+                      ref={playbackRef}
+                      key={recordedUrl}
+                      src={recordedUrl}
+                      className="absolute inset-0 w-full h-full object-cover"
+                      controls
+                      playsInline
+                    />
+                    <div className="absolute left-3 right-3 bottom-3 px-3 py-2 rounded border border-yellow-500/40 bg-black/65 backdrop-blur-sm text-[10px] font-mono uppercase tracking-[0.16em] text-yellow-100">
+                      review clip only. `process capture` starts a new synchronized OAK capture;
+                      this web recording is not uploaded into Stream 01.
+                    </div>
+                  </>
                 )}
 
                 {/* Scanner grid overlay */}
@@ -899,7 +905,7 @@ export default function UploadSection({
                         className="primary-button-solid text-xs px-4 py-2 font-mono flex items-center gap-2 disabled:opacity-60 disabled:cursor-wait"
                       >
                         <span className="opacity-70">./</span>
-                        {pipelineStarting ? 'starting_pipeline…' : 'process_capture'}
+                        {pipelineStarting ? 'starting_pipeline…' : 'start_live_capture'}
                         <ArrowRight className="w-3.5 h-3.5" />
                       </motion.button>
                     </>

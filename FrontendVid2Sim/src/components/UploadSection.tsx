@@ -1,17 +1,554 @@
-import { useRef, useState } from 'react';
-import { motion } from 'framer-motion';
-import { UploadCloud, FileVideo, X, ScanLine } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+  UploadCloud,
+  FileVideo,
+  X,
+  ScanLine,
+  Circle,
+  Square,
+  Video,
+  VideoOff,
+  AlertTriangle,
+  Camera,
+} from 'lucide-react';
 import { StatusRibbon, CornerMark } from './SectionChrome';
 
 interface UploadSectionProps {
-  onUploadComplete: () => void;
+  /**
+   * Fired when the live-capture path successfully kicks off a real
+   * pipeline run on the Python server. The processing screen polls
+   * `/pipeline/status/<jobId>` from here and hands `sessionId` forward to
+   * the viewer.
+   */
+  onPipelineStarted: (jobId: string, sessionId: string) => void;
+  /**
+   * Fallback path for the drag-and-drop tab where we don't actually run
+   * the pipeline (no video-to-bundle adapter exists yet); still flips the
+   * UI into the processing → simulation flow so the demo degrades
+   * gracefully.
+   */
+  onUploadCompleteStub: () => void;
 }
 
-export default function UploadSection({ onUploadComplete }: UploadSectionProps) {
+type SourceMode = 'live' | 'upload';
+type LiveState = 'init' | 'preview' | 'recording' | 'error';
+
+function formatElapsed(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  const s = total % 60;
+  const m = Math.floor(total / 60);
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
+
+/**
+ * OAK-IP bridge endpoints. For network-attached OAKs (e.g. OAK-4 over
+ * ethernet) UVC is not possible — the Python bridge (scripts/oak_uvc.py)
+ * instead serves MJPEG on localhost:8765 and we consume it in the browser.
+ */
+const BRIDGE_HEALTH_URL = 'http://127.0.0.1:8765/health';
+const BRIDGE_STREAM_URL = 'http://127.0.0.1:8765/stream.mjpg';
+
+async function probeBridge(): Promise<boolean> {
+  try {
+    const res = await fetch(BRIDGE_HEALTH_URL, { cache: 'no-store' });
+    if (!res.ok) return false;
+    const ct = res.headers.get('content-type') ?? '';
+    if (!ct.includes('json')) return false;
+    const body = (await res.json()) as { ok?: boolean; source?: string };
+    return body?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True if a device's label looks like a Luxonis OAK camera. OAK devices
+ * exposed in UVC mode typically advertise a label containing "OAK" (e.g.
+ * "OAK-4", "OAK-D Pro", "OAK-1 (03e7:2485)").
+ */
+function isOakDevice(label: string): boolean {
+  const l = label.toLowerCase();
+  return l.includes('oak') || l.includes('luxonis') || l.includes('depthai');
+}
+
+
+export default function UploadSection({
+  onPipelineStarted,
+  onUploadCompleteStub,
+}: UploadSectionProps) {
+  const [mode, setMode] = useState<SourceMode>('live');
+
+  // --- upload tab state ---
   const [isDragging, setIsDragging] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // --- live tab state ---
+  const [liveState, setLiveState] = useState<LiveState>('init');
+  const [mediaErr, setMediaErr] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [devicePath, setDevicePath] = useState<string>('webcam·default');
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const [oakHint, setOakHint] = useState<string | null>(null);
+  const [cameraStarting, setCameraStarting] = useState(false);
+  const [pipelineKickError, setPipelineKickError] = useState<string | null>(null);
+  const [pipelineStarting, setPipelineStarting] = useState(false);
+
+  const livePreviewRef = useRef<HTMLVideoElement>(null);
+  const bridgeImgRef = useRef<HTMLImageElement | null>(null);
+  const bridgeCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const bridgeRafRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const activeJobIdRef = useRef<string | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const tickStartRef = useRef<number>(0);
+  const tickRafRef = useRef<number | null>(null);
+  const devicesEnumeratedRef = useRef<boolean>(false);
+  const bridgeActiveRef = useRef<boolean>(false);
+  const [bridgeActive, setBridgeActive] = useState(false);
+  useEffect(() => { bridgeActiveRef.current = bridgeActive; }, [bridgeActive]);
+
+  // ------------------------------------------------------------------
+  // Camera lifecycle.
+  // ------------------------------------------------------------------
+  const stopBridge = useCallback(() => {
+    if (bridgeRafRef.current !== null) {
+      cancelAnimationFrame(bridgeRafRef.current);
+      bridgeRafRef.current = null;
+    }
+    const img = bridgeImgRef.current;
+    if (img) {
+      img.src = '';
+      img.remove();
+      bridgeImgRef.current = null;
+    }
+    const canvas = bridgeCanvasRef.current;
+    if (canvas) {
+      canvas.remove();
+      bridgeCanvasRef.current = null;
+    }
+    setBridgeActive(false);
+  }, []);
+
+  const stopStream = useCallback(() => {
+    if (streamRef.current) {
+      for (const track of streamRef.current.getTracks()) track.stop();
+      streamRef.current = null;
+    }
+    stopBridge();
+  }, [stopBridge]);
+
+  const attachStreamToPreview = useCallback(async (stream: MediaStream) => {
+    const video = livePreviewRef.current;
+    if (!video) return;
+    video.srcObject = stream;
+    video.muted = true;
+    video.playsInline = true;
+    await video.play().catch(() => {
+      // Autoplay can be blocked; next user gesture resumes it.
+    });
+  }, []);
+
+  /**
+   * Build a MediaStream from the Python MJPEG bridge. The OAK-4 connected
+   * over ethernet cannot expose UVC (UVC is USB-only), so instead the
+   * Python script serves MJPEG on localhost:8765. We:
+   *   1. Load the MJPEG into a hidden `<img>` (browsers decode MJPEG natively)
+   *   2. rAF-blit the img onto a hidden `<canvas>` at 30fps
+   *   3. `canvas.captureStream(30)` gives us a MediaStream that MediaRecorder
+   *      and our preview `<video>` both accept unchanged.
+   * Result: no other code path needs to know whether frames came from UVC
+   * or from the bridge.
+   */
+  const startOakBridge = useCallback(async (): Promise<MediaStream | null> => {
+    const healthy = await probeBridge();
+    if (!healthy) return null;
+
+    const img = document.createElement('img');
+    img.crossOrigin = 'anonymous';
+    img.style.display = 'none';
+    document.body.appendChild(img);
+    bridgeImgRef.current = img;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    canvas.style.display = 'none';
+    document.body.appendChild(canvas);
+    bridgeCanvasRef.current = canvas;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      stopBridge();
+      return null;
+    }
+
+    // Wait until at least one frame decoded — otherwise captureStream has no
+    // content and MediaRecorder may fail to start.
+    await new Promise<void>((resolve, reject) => {
+      const onLoad = () => {
+        if (img.naturalWidth > 0) {
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          resolve();
+        }
+      };
+      img.addEventListener('load', onLoad, { once: true });
+      img.addEventListener(
+        'error',
+        () => reject(new Error('OAK bridge image stream failed to load')),
+        { once: true },
+      );
+      img.src = BRIDGE_STREAM_URL;
+      // Fallback timeout in case `load` never fires (some browsers only emit
+      // load once per multipart stream, others emit per frame).
+      setTimeout(() => {
+        if (img.naturalWidth > 0) {
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          resolve();
+        }
+      }, 1500);
+    });
+
+    const render = () => {
+      if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+        if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+        }
+        try {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        } catch {
+          // CORS taint or transient error — the handler logs the failure.
+        }
+      }
+      bridgeRafRef.current = requestAnimationFrame(render);
+    };
+    bridgeRafRef.current = requestAnimationFrame(render);
+
+    const stream = (canvas as HTMLCanvasElement).captureStream(30);
+    setBridgeActive(true);
+    return stream;
+  }, [stopBridge]);
+
+  /**
+   * Enumerate video inputs. Labels are only populated after at least one
+   * getUserMedia permission has been granted — so we call this AFTER the
+   * first stream has opened.
+   */
+  const refreshDevices = useCallback(async (): Promise<MediaDeviceInfo[]> => {
+    if (!navigator.mediaDevices?.enumerateDevices) return [];
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = all.filter((d) => d.kind === 'videoinput');
+      setDevices(videoInputs);
+      devicesEnumeratedRef.current = true;
+      const oak = videoInputs.find((d) => isOakDevice(d.label));
+      if (oak) {
+        setOakHint(null);
+      } else if (videoInputs.length > 0 && !bridgeActiveRef.current) {
+        setOakHint(
+          'OAK not detected. The dev server auto-starts scripts/oak_uvc.py — look for [oak-uvc] ' +
+            'messages in the terminal running `npm run dev`. For a USB-attached OAK the script ' +
+            'opens UVC mode; for a network-attached OAK (e.g. OAK-4 on ethernet, UVC impossible) ' +
+            'it serves MJPEG at http://127.0.0.1:8765/stream.mjpg which this page consumes ' +
+            'automatically. If the bridge isn\'t running: `pip install depthai opencv-python` and ' +
+            'restart the dev server.',
+        );
+      }
+      return videoInputs;
+    } catch (err) {
+      console.warn('[UploadSection] enumerateDevices failed', err);
+      return [];
+    }
+  }, []);
+
+  /**
+   * Open a video stream. If `preferredDeviceId` is given, pin to it with
+   * `deviceId: { exact }`; otherwise open the default, enumerate devices,
+   * and auto-switch to the OAK if present.
+   */
+  const startCamera = useCallback(
+    async (preferredDeviceId?: string | null): Promise<MediaStream | null> => {
+      setMediaErr(null);
+      stopStream();
+
+      // Prefer the OAK IP bridge (if the Python script is running). This
+      // is the only way a network-attached OAK reaches the browser, since
+      // UVC is USB-only.
+      if (!preferredDeviceId) {
+        try {
+          const bridgeStream = await startOakBridge();
+          if (bridgeStream) {
+            streamRef.current = bridgeStream;
+            await attachStreamToPreview(bridgeStream);
+            setDevicePath('OAK · IP bridge · 1280×720@30fps');
+            setOakHint(null);
+            setLiveState('preview');
+            return bridgeStream;
+          }
+        } catch (err) {
+          console.warn('[UploadSection] OAK IP bridge failed, falling back to getUserMedia', err);
+          stopBridge();
+        }
+      }
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setLiveState('error');
+        setMediaErr(
+          'This browser does not expose the MediaDevices API. Use Chrome, Safari, or Firefox latest, served over HTTPS or localhost.',
+        );
+        return null;
+      }
+      try {
+
+        const videoConstraint: MediaTrackConstraints = preferredDeviceId
+          ? { deviceId: { exact: preferredDeviceId } }
+          : {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              frameRate: { ideal: 30 },
+            };
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: videoConstraint,
+          audio: false,
+        });
+        streamRef.current = stream;
+        await attachStreamToPreview(stream);
+
+        const track = stream.getVideoTracks()[0];
+        const settings = track?.getSettings();
+        const activeId = settings?.deviceId ?? preferredDeviceId ?? null;
+
+        // Populate the device list (requires an open stream for labels).
+        const list = await refreshDevices();
+
+        // Auto-switch to OAK on the first open if we didn't explicitly pin a
+        // device and an OAK is present but wasn't what the browser chose.
+        if (!preferredDeviceId) {
+          const current = list.find((d) => d.deviceId === activeId);
+          const oak = list.find((d) => isOakDevice(d.label));
+          if (oak && oak.deviceId !== current?.deviceId) {
+            // Switch. The recursive call will pin to the OAK.
+            console.info('[UploadSection] auto-switching to OAK device:', oak.label);
+            return await startCamera(oak.deviceId);
+          }
+          setSelectedDeviceId(activeId);
+        } else {
+          setSelectedDeviceId(activeId ?? preferredDeviceId);
+        }
+
+        // Pretty device-path string for the status row.
+        const activeLabel =
+          list.find((d) => d.deviceId === activeId)?.label ?? track?.label ?? 'camera';
+        const shortLabel = activeLabel.replace(/\s*\([0-9a-f]+:[0-9a-f]+\)\s*$/i, '').trim();
+        if (settings?.width && settings?.height) {
+          setDevicePath(
+            `${shortLabel || 'webcam'} · ${settings.width}×${settings.height}@${Math.round(
+              settings.frameRate ?? 30,
+            )}fps`,
+          );
+        } else {
+          setDevicePath(shortLabel || 'webcam');
+        }
+
+        setLiveState('preview');
+        return stream;
+      } catch (err) {
+        console.error('[UploadSection] getUserMedia failed', err);
+        setLiveState('error');
+        setMediaErr(
+          err instanceof DOMException && err.name === 'NotAllowedError'
+            ? 'Camera access denied. Grant permission in your browser site settings and reload.'
+            : err instanceof DOMException && err.name === 'NotFoundError'
+              ? 'No camera detected. Plug in an OAK-4 or any webcam and retry.'
+              : err instanceof DOMException && err.name === 'OverconstrainedError'
+                ? 'Selected device is no longer available. Pick another camera.'
+              : `Could not open camera: ${(err as Error).message ?? String(err)}`,
+        );
+        return null;
+      }
+    },
+    [attachStreamToPreview, refreshDevices, startOakBridge, stopBridge, stopStream],
+  );
+
+  /** User picked a device from the dropdown. */
+  const handleDeviceChange = useCallback(
+    (deviceId: string) => {
+      if (!deviceId || deviceId === selectedDeviceId) return;
+      setSelectedDeviceId(deviceId);
+      if (liveState !== 'recording') {
+        void startCamera(deviceId);
+      }
+    },
+    [liveState, selectedDeviceId, startCamera],
+  );
+
+  useEffect(() => {
+    if (mode !== 'live') {
+      stopStream();
+      return;
+    }
+    if (liveState === 'recording' || liveState === 'error' || streamRef.current || cameraStarting) {
+      return;
+    }
+    setCameraStarting(true);
+    void startCamera(selectedDeviceId ?? undefined).finally(() => {
+      setCameraStarting(false);
+    });
+  }, [cameraStarting, liveState, mode, selectedDeviceId, startCamera, stopStream]);
+
+  // React to USB hot-plug (OAK plugged in after page load).
+  useEffect(() => {
+    if (!navigator.mediaDevices?.addEventListener) return;
+    const onChange = () => {
+      void refreshDevices().then((list) => {
+        if (!devicesEnumeratedRef.current) return;
+        // If the user hasn't picked anything yet and an OAK just appeared,
+        // switch to it automatically.
+        if (!selectedDeviceId) {
+          const oak = list.find((d) => isOakDevice(d.label));
+          if (oak) {
+            console.info('[UploadSection] OAK appeared on hot-plug:', oak.label);
+            setSelectedDeviceId(oak.deviceId);
+          }
+        }
+      });
+    };
+    navigator.mediaDevices.addEventListener('devicechange', onChange);
+    return () => {
+      navigator.mediaDevices?.removeEventListener('devicechange', onChange);
+    };
+  }, [refreshDevices, selectedDeviceId]);
+
+  // Cleanup on unmount: stop tracks and try to stop an in-flight backend capture.
+  useEffect(() => {
+    return () => {
+      const activeJobId = activeJobIdRef.current;
+      if (activeJobId) {
+        void fetch(`http://127.0.0.1:8765/pipeline/stop/${activeJobId}`, {
+          method: 'POST',
+        }).catch(() => {
+          // Best-effort cleanup only.
+        });
+      }
+      stopStream();
+      if (tickRafRef.current !== null) {
+        cancelAnimationFrame(tickRafRef.current);
+        tickRafRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ------------------------------------------------------------------
+  // Recording controls.
+  // ------------------------------------------------------------------
+  const tickLoop = useCallback(() => {
+    const run = () => {
+      setElapsed(Date.now() - tickStartRef.current);
+      tickRafRef.current = requestAnimationFrame(run);
+    };
+    tickRafRef.current = requestAnimationFrame(run);
+  }, []);
+
+  const stopTickLoop = useCallback(() => {
+    if (tickRafRef.current !== null) {
+      cancelAnimationFrame(tickRafRef.current);
+      tickRafRef.current = null;
+    }
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (cameraStarting || pipelineStarting) return;
+    setPipelineKickError(null);
+    const stream = streamRef.current ?? (await startCamera(selectedDeviceId ?? undefined));
+    if (!stream) {
+      return;
+    }
+    try {
+      setPipelineStarting(true);
+      const res = await fetch('http://127.0.0.1:8765/pipeline/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_duration_s: 30 }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`HTTP ${res.status}: ${body}`);
+      }
+      const job = await res.json() as { job_id: string; session_id: string };
+      activeJobIdRef.current = job.job_id;
+      activeSessionIdRef.current = job.session_id;
+      console.log('hello world');
+    } catch (err) {
+      console.error('[UploadSection] pipeline start failed', err);
+      setLiveState('preview');
+      setPipelineKickError(
+        `Could not start backend capture: ${err instanceof Error ? err.message : String(err)}.`,
+      );
+      return;
+    } finally {
+      setPipelineStarting(false);
+    }
+    tickStartRef.current = Date.now();
+    setElapsed(0);
+    tickLoop();
+    setLiveState('recording');
+  }, [cameraStarting, pipelineStarting, selectedDeviceId, startCamera, tickLoop]);
+
+  const stopRecording = useCallback(async () => {
+    const activeJobId = activeJobIdRef.current;
+    const activeSessionId = activeSessionIdRef.current;
+    if (!activeJobId || !activeSessionId) {
+      stopTickLoop();
+      setLiveState('preview');
+      return;
+    }
+    stopTickLoop();
+    try {
+      setPipelineStarting(true);
+      const res = await fetch(`http://127.0.0.1:8765/pipeline/stop/${activeJobId}`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`HTTP ${res.status}: ${body}`);
+      }
+      activeJobIdRef.current = null;
+      activeSessionIdRef.current = null;
+      onPipelineStarted(activeJobId, activeSessionId);
+    } catch (err) {
+      console.error('[UploadSection] pipeline stop failed', err);
+      setPipelineKickError(
+        `Could not stop backend capture: ${err instanceof Error ? err.message : String(err)}.`,
+      );
+      setLiveState('recording');
+      tickStartRef.current = Date.now() - elapsed;
+      tickLoop();
+    } finally {
+      setPipelineStarting(false);
+    }
+  }, [elapsed, onPipelineStarted, stopTickLoop, tickLoop]);
+
+  // ------------------------------------------------------------------
+  // Commit paths.
+  //   - file upload: no video→bundle adapter yet, so we still flip the UI
+  //     into the processing flow and let it fall back to the cached scene.
+  // ------------------------------------------------------------------
+  const commitUpload = useCallback(() => {
+    if (!file) return;
+    // Uploaded videos don't carry depth/IMU, so we can't feed them into
+    // Stream 01's bundler. Hand off to the stub processing flow.
+    onUploadCompleteStub();
+  }, [file, onUploadCompleteStub]);
+
+  // ------------------------------------------------------------------
+  // Drag & drop handlers (unchanged behavior, kept behind the Upload tab).
+  // ------------------------------------------------------------------
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
@@ -19,17 +556,13 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
       setFile(e.dataTransfer.files[0]);
     }
   };
-
   const handlePick = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (f) setFile(f);
     e.target.value = '';
   };
 
-  const simulateUpload = () => {
-    if (!file) return;
-    onUploadComplete();
-  };
+  const isRecording = liveState === 'recording';
 
   return (
     <div className="w-full flex-1 flex flex-col items-center justify-center relative px-4 py-16">
@@ -40,12 +573,19 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
       >
         <StatusRibbon
           id="SYS·SCAN"
-          label="awaiting input · oak-4 capture"
+          label={
+            mode === 'live'
+              ? liveState === 'recording'
+                ? 'live capture · recording'
+                : liveState === 'preview'
+                  ? 'live capture · rgb preview ready'
+                  : 'live capture · awaiting capture'
+              : 'file upload · awaiting input'
+          }
           right={
             <>
-              <span>max·2gb</span>
-              <span className="hidden md:inline">codec·h264|h265</span>
-              <span className="text-primary">●</span>
+              <span>{mode === 'live' ? devicePath : 'max·2gb · codec·h264|h265'}</span>
+              <span className={isRecording ? 'text-red-400' : 'text-primary'}>●</span>
             </>
           }
         />
@@ -55,134 +595,351 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
         initial={{ opacity: 0, scale: 0.97 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.5 }}
-        className="relative w-full max-w-2xl glass-panel p-10 flex flex-col overflow-hidden"
+        className="relative w-full max-w-2xl glass-panel p-8 flex flex-col overflow-hidden"
       >
         <CornerMark className="top-3 left-3" rot={0} size={14} />
         <CornerMark className="top-3 right-3" rot={90} size={14} />
         <CornerMark className="bottom-3 right-3" rot={180} size={14} />
         <CornerMark className="bottom-3 left-3" rot={270} size={14} />
 
-        <div className="flex items-baseline gap-3 mb-6">
+        <div className="flex items-baseline gap-3 mb-5">
           <span className="text-xs font-mono text-primary/70">[01]</span>
           <div>
-            <h2 className="text-3xl font-bold">Upload Footage</h2>
+            <h2 className="text-3xl font-bold">Capture Footage</h2>
             <p className="text-textSecondary mt-1">
-              Drag and drop your OAK-4 capture in .mp4 format
+              Record a live scan from your OAK-4 (or any webcam) — or drop a recorded clip.
             </p>
           </div>
         </div>
 
-        {!file ? (
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setIsDragging(true);
-            }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={handleDrop}
-            onClick={() => inputRef.current?.click()}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') inputRef.current?.click();
-            }}
-            className={`
-              relative w-full h-72 rounded-2xl border-2 border-dashed transition-all duration-300 flex flex-col items-center justify-center cursor-pointer overflow-hidden
-              ${
-                isDragging
-                  ? 'border-primary bg-primary/5 scale-[1.02]'
-                  : 'border-border bg-surface/30 hover:border-textSecondary/50'
-              }
-            `}
+        {/* Source-mode tabs */}
+        <div className="grid grid-cols-2 gap-2 mb-5">
+          <button
+            onClick={() => setMode('live')}
+            className={[
+              'flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border text-sm font-mono transition-all',
+              mode === 'live'
+                ? 'bg-primary/15 border-primary/40 text-primary shadow-[0_0_18px_rgba(228,107,69,0.15)]'
+                : 'bg-surfaceHover/40 border-border text-textSecondary hover:text-white hover:border-primary/30',
+            ].join(' ')}
           >
-            <input
-              ref={inputRef}
-              type="file"
-              accept="video/*"
-              className="hidden"
-              onChange={handlePick}
-            />
+            <Video className="w-4 h-4" />
+            live capture
+          </button>
+          <button
+            onClick={() => setMode('upload')}
+            className={[
+              'flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border text-sm font-mono transition-all',
+              mode === 'upload'
+                ? 'bg-primary/15 border-primary/40 text-primary shadow-[0_0_18px_rgba(228,107,69,0.15)]'
+                : 'bg-surfaceHover/40 border-border text-textSecondary hover:text-white hover:border-primary/30',
+            ].join(' ')}
+          >
+            <UploadCloud className="w-4 h-4" />
+            drop file
+          </button>
+        </div>
 
-            {/* Scanner grid backdrop */}
-            <div
-              aria-hidden
-              className="absolute inset-0 opacity-[0.08] pointer-events-none"
-              style={{
-                backgroundImage:
-                  'linear-gradient(to right, rgba(228,107,69,0.5) 1px, transparent 1px), linear-gradient(to bottom, rgba(228,107,69,0.5) 1px, transparent 1px)',
-                backgroundSize: '20px 20px',
-              }}
-            />
-
-            {/* Moving scan line */}
+        <AnimatePresence mode="wait">
+          {mode === 'live' ? (
             <motion.div
-              aria-hidden
-              initial={{ y: '-100%' }}
-              animate={{ y: '100%' }}
-              transition={{ duration: 3, repeat: Infinity, ease: 'linear' }}
-              className="absolute left-0 w-full h-12 bg-gradient-to-b from-transparent via-primary/15 to-transparent pointer-events-none"
-            />
-
-            <CornerMark className="top-3 left-3" rot={0} size={10} />
-            <CornerMark className="top-3 right-3" rot={90} size={10} />
-            <CornerMark className="bottom-3 right-3" rot={180} size={10} />
-            <CornerMark className="bottom-3 left-3" rot={270} size={10} />
-
-            <div className="relative w-16 h-16 rounded-full bg-surface border border-border flex items-center justify-center mb-4 shadow-lg">
-              <UploadCloud
-                className={`w-8 h-8 ${
-                  isDragging ? 'text-primary' : 'text-textSecondary'
-                }`}
-              />
-            </div>
-            <p className="relative font-medium mb-1">
-              Click to browse or drag file here
-            </p>
-            <p className="relative text-[10px] text-textSecondary uppercase tracking-[0.25em] font-mono flex items-center gap-2">
-              <ScanLine className="w-3 h-3" />
-              target zone · up to 2GB
-            </p>
-          </div>
-        ) : (
-          <div className="relative w-full h-72 rounded-2xl border border-border bg-surface/30 flex flex-col items-center justify-center">
-            <motion.button
-              whileHover={{ scale: 1.1, rotate: 90 }}
-              whileTap={{ scale: 0.9 }}
-              onClick={() => setFile(null)}
-              className="absolute top-4 right-4 p-2 rounded-full hover:bg-white/10 transition-colors"
+              key="live"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.2 }}
+              className="relative w-full rounded-2xl border border-border bg-black/40 overflow-hidden"
             >
-              <X className="w-5 h-5 text-textSecondary" />
-            </motion.button>
+              {/* Live preview stage */}
+              <div className="relative aspect-video w-full bg-black">
+                <video
+                  ref={livePreviewRef}
+                  className="absolute inset-0 w-full h-full object-cover transition-opacity duration-200"
+                  muted
+                  playsInline
+                  autoPlay
+                />
 
-            <CornerMark className="top-3 left-3" rot={0} size={10} />
-            <CornerMark className="top-3 right-3" rot={90} size={10} />
-            <CornerMark className="bottom-3 right-3" rot={180} size={10} />
-            <CornerMark className="bottom-3 left-3" rot={270} size={10} />
+                {/* Scanner grid overlay */}
+                <div
+                  aria-hidden
+                  className="absolute inset-0 opacity-[0.12] pointer-events-none"
+                  style={{
+                    backgroundImage:
+                      'linear-gradient(to right, rgba(228,107,69,0.4) 1px, transparent 1px), linear-gradient(to bottom, rgba(228,107,69,0.4) 1px, transparent 1px)',
+                    backgroundSize: '24px 24px',
+                  }}
+                />
 
-            <div className="w-16 h-16 rounded-xl bg-primary/15 border border-primary/30 flex items-center justify-center mb-4 text-primary shadow-[0_0_20px_rgba(228,107,69,0.15)]">
-              <FileVideo className="w-8 h-8" />
-            </div>
-            <p className="font-mono text-sm text-textSecondary mb-1">
-              <span className="text-primary">file·</span>
-              {file.name}
-            </p>
-            <p className="text-[10px] font-mono text-textSecondary/70 uppercase tracking-[0.2em] mb-6">
-              {(file.size / (1024 * 1024)).toFixed(2)} MB · ready
-            </p>
+                {/* Top-left telemetry */}
+                <div className="absolute top-3 left-3 flex items-center gap-2">
+                  <div className="px-2 py-1 rounded bg-black/50 backdrop-blur-sm border border-border text-[10px] font-mono uppercase tracking-[0.2em] text-textSecondary flex items-center gap-2">
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        isRecording
+                          ? 'bg-red-500 animate-pulse'
+                          : liveState === 'preview'
+                            ? 'bg-emerald-400 animate-pulse'
+                            : 'bg-slate-400'
+                      }`}
+                    />
+                    {isRecording ? 'rec' : liveState === 'preview' ? 'live' : cameraStarting ? 'arm' : 'idle'}
+                  </div>
+                  {bridgeActive && (
+                    <div className="px-2 py-1 rounded bg-emerald-500/15 backdrop-blur-sm border border-emerald-500/40 text-[10px] font-mono uppercase tracking-[0.18em] text-emerald-300">
+                      OAK · IP bridge
+                    </div>
+                  )}
+                </div>
 
-            <motion.button
-              whileHover={{
-                scale: 1.05,
-                boxShadow: '0 0 20px rgba(228,107,69,0.3)',
-              }}
-              whileTap={{ scale: 0.95 }}
-              onClick={simulateUpload}
-              className="primary-button-solid text-sm px-7 py-3 font-mono"
+                {/* Elapsed timer */}
+                {isRecording && (
+                  <div className="absolute top-3 right-3 px-2.5 py-1 rounded bg-black/50 backdrop-blur-sm border border-border text-[11px] font-mono text-white tabular-nums">
+                    {formatElapsed(elapsed)}
+                  </div>
+                )}
+
+                {/* Recording pulse border */}
+                {isRecording && (
+                  <motion.div
+                    aria-hidden
+                    className="absolute inset-0 pointer-events-none rounded-2xl ring-2 ring-red-500/70"
+                    animate={{ opacity: [0.3, 0.9, 0.3] }}
+                    transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
+                  />
+                )}
+
+                {/* Corner markers on the video stage */}
+                <CornerMark className="top-2 left-2" rot={0} size={12} />
+                <CornerMark className="top-2 right-2" rot={90} size={12} />
+                <CornerMark className="bottom-2 right-2" rot={180} size={12} />
+                <CornerMark className="bottom-2 left-2" rot={270} size={12} />
+
+                {/* Init/error overlay */}
+                {liveState === 'init' && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm text-center p-6">
+                    <div className="flex flex-col items-center gap-3 text-textSecondary">
+                      <Video className={`w-8 h-8 text-primary ${cameraStarting ? 'animate-pulse' : ''}`} />
+                      <span className="font-mono text-xs uppercase tracking-[0.2em]">
+                        {cameraStarting ? 'opening rgb preview…' : 'camera idle'}
+                      </span>
+                    </div>
+                  </div>
+                )}
+                {liveState === 'error' && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm text-center p-6">
+                    <div className="flex flex-col items-center gap-3 max-w-sm">
+                      <VideoOff className="w-8 h-8 text-red-400" />
+                      <div className="flex items-center gap-2 text-red-300 text-sm font-medium">
+                        <AlertTriangle className="w-4 h-4" />
+                        Camera unavailable
+                      </div>
+                      <p className="text-[11px] text-textSecondary leading-relaxed">
+                        {pipelineKickError ?? mediaErr ?? 'Unknown media error.'}
+                      </p>
+                      <button
+                        onClick={() => void startCamera(selectedDeviceId ?? undefined)}
+                        className="mt-1 px-4 py-1.5 rounded border border-primary/40 bg-primary/10 text-primary text-xs font-mono hover:bg-primary/20 transition-colors"
+                      >
+                        retry
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Control strip */}
+              <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-border/70 bg-black/30">
+                <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-textSecondary/70 flex items-center gap-2 min-w-0 truncate flex-1">
+                  <>
+                    <Camera
+                      className={`w-3 h-3 shrink-0 ${
+                        devices.some((d) => d.deviceId === selectedDeviceId && isOakDevice(d.label))
+                          ? 'text-emerald-400'
+                          : 'text-primary'
+                      }`}
+                    />
+                    {devices.length > 1 ? (
+                      <select
+                        value={selectedDeviceId ?? ''}
+                        onChange={(e) => handleDeviceChange(e.target.value)}
+                        disabled={isRecording || pipelineStarting}
+                        title="Select camera"
+                        className="bg-black/40 border border-border rounded px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-textSecondary focus:outline-none focus:border-primary/60 disabled:opacity-50 max-w-[18rem] truncate"
+                      >
+                        {devices.map((d, i) => (
+                          <option key={d.deviceId || i} value={d.deviceId}>
+                            {d.label || `camera ${i + 1}`}
+                            {isOakDevice(d.label) ? '  ★ OAK' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="truncate">{devicePath}</span>
+                    )}
+                  </>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {(liveState === 'init' || liveState === 'preview') && (
+                    <motion.button
+                      whileHover={{ scale: 1.04 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => void startRecording()}
+                      disabled={cameraStarting || pipelineStarting}
+                      className="flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/15 border border-red-500/40 text-red-300 hover:bg-red-500/25 transition-colors font-mono text-xs uppercase tracking-[0.2em] disabled:opacity-60"
+                    >
+                      <Circle className="w-3.5 h-3.5 fill-red-400 text-red-400" />
+                      {pipelineStarting ? 'starting…' : 'record'}
+                    </motion.button>
+                  )}
+                  {liveState === 'recording' && (
+                    <motion.button
+                      whileHover={{ scale: 1.04 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => void stopRecording()}
+                      disabled={pipelineStarting}
+                      className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/90 text-black hover:bg-white transition-colors font-mono text-xs uppercase tracking-[0.2em] disabled:opacity-60"
+                    >
+                      <Square className="w-3.5 h-3.5 fill-black" />
+                      {pipelineStarting ? 'stopping…' : 'stop'}
+                    </motion.button>
+                  )}
+                </div>
+              </div>
+
+              <div className="px-4 py-2 border-t border-border/60 bg-yellow-500/5 text-[11px] font-mono text-yellow-100/90 leading-relaxed">
+                Preview is RGB-only. Depth, masks, and reconstruction start only after you press
+                record, and backend capture stops when you press stop.
+              </div>
+
+              {/* Pipeline kickoff error */}
+              {pipelineKickError && (
+                <div className="flex items-start gap-2 px-4 py-2 border-t border-border/60 bg-red-500/10 text-[11px] font-mono text-red-200">
+                  <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5 text-red-400" />
+                  <span className="leading-relaxed">{pipelineKickError}</span>
+                </div>
+              )}
+
+              {/* OAK-not-found hint */}
+              {oakHint && liveState !== 'error' && (
+                <div className="flex items-start gap-2 px-4 py-2 border-t border-border/60 bg-yellow-500/5 text-[10px] font-mono uppercase tracking-[0.18em] text-yellow-200/80">
+                  <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5 text-yellow-400" />
+                  <span className="leading-relaxed">{oakHint}</span>
+                </div>
+              )}
+            </motion.div>
+          ) : (
+            <motion.div
+              key="upload"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.2 }}
             >
-              <span className="opacity-70">./</span>process_video
-            </motion.button>
-          </div>
-        )}
+              {!file ? (
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDragging(true);
+                  }}
+                  onDragLeave={() => setIsDragging(false)}
+                  onDrop={handleDrop}
+                  onClick={() => inputRef.current?.click()}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') inputRef.current?.click();
+                  }}
+                  className={`
+                    relative w-full h-72 rounded-2xl border-2 border-dashed transition-all duration-300 flex flex-col items-center justify-center cursor-pointer overflow-hidden
+                    ${isDragging
+                      ? 'border-primary bg-primary/5 scale-[1.02]'
+                      : 'border-border bg-surface/30 hover:border-textSecondary/50'
+                    }
+                  `}
+                >
+                  <input
+                    ref={inputRef}
+                    type="file"
+                    accept="video/*"
+                    className="hidden"
+                    onChange={handlePick}
+                  />
+                  <div
+                    aria-hidden
+                    className="absolute inset-0 opacity-[0.08] pointer-events-none"
+                    style={{
+                      backgroundImage:
+                        'linear-gradient(to right, rgba(228,107,69,0.5) 1px, transparent 1px), linear-gradient(to bottom, rgba(228,107,69,0.5) 1px, transparent 1px)',
+                      backgroundSize: '20px 20px',
+                    }}
+                  />
+                  <motion.div
+                    aria-hidden
+                    initial={{ y: '-100%' }}
+                    animate={{ y: '100%' }}
+                    transition={{ duration: 3, repeat: Infinity, ease: 'linear' }}
+                    className="absolute left-0 w-full h-12 bg-gradient-to-b from-transparent via-primary/15 to-transparent pointer-events-none"
+                  />
+
+                  <CornerMark className="top-3 left-3" rot={0} size={10} />
+                  <CornerMark className="top-3 right-3" rot={90} size={10} />
+                  <CornerMark className="bottom-3 right-3" rot={180} size={10} />
+                  <CornerMark className="bottom-3 left-3" rot={270} size={10} />
+
+                  <div className="relative w-16 h-16 rounded-full bg-surface border border-border flex items-center justify-center mb-4 shadow-lg">
+                    <UploadCloud className={`w-8 h-8 ${isDragging ? 'text-primary' : 'text-textSecondary'}`} />
+                  </div>
+                  <p className="relative font-medium mb-1">Click to browse or drag file here</p>
+                  <p className="relative text-[10px] text-textSecondary uppercase tracking-[0.25em] font-mono flex items-center gap-2">
+                    <ScanLine className="w-3 h-3" />
+                    target zone · up to 2GB
+                  </p>
+                </div>
+              ) : (
+                <div className="relative w-full h-72 rounded-2xl border border-border bg-surface/30 flex flex-col items-center justify-center">
+                  <motion.button
+                    whileHover={{ scale: 1.1, rotate: 90 }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={() => setFile(null)}
+                    className="absolute top-4 right-4 p-2 rounded-full hover:bg-white/10 transition-colors"
+                  >
+                    <X className="w-5 h-5 text-textSecondary" />
+                  </motion.button>
+
+                  <CornerMark className="top-3 left-3" rot={0} size={10} />
+                  <CornerMark className="top-3 right-3" rot={90} size={10} />
+                  <CornerMark className="bottom-3 right-3" rot={180} size={10} />
+                  <CornerMark className="bottom-3 left-3" rot={270} size={10} />
+
+                  <div className="w-16 h-16 rounded-xl bg-primary/15 border border-primary/30 flex items-center justify-center mb-4 text-primary shadow-[0_0_20px_rgba(228,107,69,0.15)]">
+                    <FileVideo className="w-8 h-8" />
+                  </div>
+                  <p className="font-mono text-sm text-textSecondary mb-1">
+                    <span className="text-primary">file·</span>
+                    {file.name}
+                  </p>
+                  <p className="text-[10px] font-mono text-textSecondary/70 uppercase tracking-[0.2em] mb-6">
+                    {(file.size / (1024 * 1024)).toFixed(2)} MB · ready
+                  </p>
+
+                  <motion.button
+                    whileHover={{
+                      scale: 1.05,
+                      boxShadow: '0 0 20px rgba(228,107,69,0.3)',
+                    }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={commitUpload}
+                    className="primary-button-solid text-sm px-7 py-3 font-mono"
+                  >
+                    <span className="opacity-70">./</span>process_video
+                  </motion.button>
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Bottom tech strip */}
         <div className="mt-5 pt-3 border-t border-dashed border-border/60 flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono uppercase tracking-[0.2em] text-textSecondary/60">

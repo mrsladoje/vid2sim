@@ -71,7 +71,8 @@ def main() -> int:
     parser.add_argument("--session", required=True)
     parser.add_argument("--out", type=Path, default=Path("data/reconstructed"))
     parser.add_argument("--config", type=Path, default=None)
-    parser.add_argument("--frame", type=int, default=0)
+    parser.add_argument("--frame", type=int, default=-1,
+                        help="Keyframe to reconstruct (-1 = auto-pick best frame).")
     parser.add_argument("--max-objects", type=int, default=5)
     parser.add_argument("--offline", action="store_true",
                         help="Skip RunPod; use local unit-cube emitter.")

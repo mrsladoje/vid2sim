@@ -56,6 +56,35 @@ def bounds_for(class_name: str) -> tuple[float, float]:
     return SCALE_BOUNDS.get(class_name, DEFAULT_BOUNDS)
 
 
+def mesh_aware_scale(
+    class_name: str,
+    observed_height_m: float,
+    fallback: float = 1.0,
+) -> float:
+    """Return a uniform scale that brings `observed_height_m` into class range.
+
+    Used by the assembler when staging meshes: the input bbox metadata in
+    ``reconstructed.json`` may describe an inlier-point cluster while the
+    mesh.glb itself is in the model-generator's *normalized* local frame
+    (e.g. ``sf3d`` outputs are roughly 1 m). This helper looks at the
+    actual mesh's height and clamps to the class prior.
+
+    Behaviour:
+      - If ``observed_height_m`` already lies inside the class range, return
+        ``fallback`` (preserves any scale produced by ``clamp_object_scale``
+        from upstream bbox metadata for synthetic / well-calibrated inputs).
+      - Otherwise return the multiplier that pulls the mesh into range.
+      - Degenerate inputs (``observed_height_m`` ≤ 0) return ``fallback``.
+    """
+    if observed_height_m <= 0:
+        return fallback
+    lo, hi = bounds_for(class_name)
+    if lo <= observed_height_m <= hi:
+        return fallback
+    target = lo if observed_height_m < lo else hi
+    return float(target / observed_height_m)
+
+
 def clamp_object_scale(obj: ReconstructedObject) -> ClampResult:
     """Return a version of `obj` with bbox height inside its class range.
 

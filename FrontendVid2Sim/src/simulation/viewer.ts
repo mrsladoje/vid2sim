@@ -1,18 +1,22 @@
 import * as THREE from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import type { SceneSpec, SceneObject } from "./types";
-import { buildPrimitiveMesh } from "./primitives";
+import type { LoadedMesh, LoadedScene } from "./types";
 
 export interface ObjectRecord {
   id: string;
-  spec: SceneObject;
-  mesh: THREE.Object3D;
+  loaded: LoadedMesh;
   bodyHandle: number | null;
+}
+
+export interface PickHit {
+  record: ObjectRecord;
+  point: THREE.Vector3;
 }
 
 const BG_COLOR = 0x0a0a0c;
 const FOG_NEAR = 14;
 const FOG_FAR = 48;
+const GROUND_SIZE = 30;
+const INTERACTION_HALF_EXTENT = GROUND_SIZE * 0.5;
 
 export class Viewer {
   readonly scene: THREE.Scene;
@@ -21,7 +25,9 @@ export class Viewer {
   readonly canvas: HTMLCanvasElement;
   readonly objects: Map<string, ObjectRecord> = new Map();
   readonly ground: THREE.Mesh;
+  readonly gridHelper: THREE.GridHelper;
 
+  private loadedScene: LoadedScene | null = null;
   private highlightTarget: THREE.Object3D | null = null;
   private readonly selectionMaterial: THREE.MeshStandardMaterial;
   private readonly originalMaterials: Map<THREE.Mesh, THREE.Material | THREE.Material[]> =
@@ -71,12 +77,11 @@ export class Viewer {
     sun.shadow.bias = -0.0005;
     this.scene.add(sun);
 
-    // A soft orange rim-light to tie the scene into the Vid2Sim palette.
     const rim = new THREE.DirectionalLight(0xe46b45, 0.35);
     rim.position.set(-5, 3, -4);
     this.scene.add(rim);
 
-    const groundGeo = new THREE.PlaneGeometry(30, 30);
+    const groundGeo = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE);
     const groundMat = new THREE.MeshStandardMaterial({
       color: 0x14141a,
       roughness: 0.95,
@@ -87,11 +92,12 @@ export class Viewer {
     this.ground.receiveShadow = true;
     this.scene.add(this.ground);
 
-    const gridHelper = new THREE.GridHelper(20, 40, 0xe46b45, 0x1e1e24);
-    (gridHelper.material as THREE.Material).transparent = true;
-    (gridHelper.material as THREE.Material).opacity = 0.25;
-    gridHelper.position.y = 0.001;
-    this.scene.add(gridHelper);
+    this.gridHelper = new THREE.GridHelper(20, 40, 0xe46b45, 0x1e1e24);
+    const gridMat = this.gridHelper.material as THREE.Material;
+    gridMat.transparent = true;
+    gridMat.opacity = 0.25;
+    this.gridHelper.position.y = 0.001;
+    this.scene.add(this.gridHelper);
 
     this.selectionMaterial = new THREE.MeshStandardMaterial({
       color: 0xe46b45,
@@ -112,54 +118,48 @@ export class Viewer {
     this.renderer.setSize(w, h, false);
   }
 
-  async loadSpec(spec: SceneSpec, baseUrl = ""): Promise<void> {
+  /**
+   * Attach a pre-resolved scene. The Object3D roots come in positioned in
+   * world coords; we do NOT mutate their child tree (preserves baked glTF
+   * textures).
+   */
+  loadScene(scene: LoadedScene): void {
     this.clear();
-    if (spec.camera_pose) {
-      const t = spec.camera_pose.translation;
-      this.camera.position.set(t[0], t[1], t[2]);
-      this.camera.lookAt(0, 0.4, 0);
-    }
-    for (const obj of spec.objects) {
-      const mesh = await this.buildMeshFor(obj, baseUrl);
-      const t = obj.transform.translation;
-      const q = obj.transform.rotation_quat;
-      mesh.position.set(t[0], t[1], t[2]);
-      mesh.quaternion.set(q[0], q[1], q[2], q[3]);
-      if (obj.transform.scale !== 1.0) mesh.scale.setScalar(obj.transform.scale);
-      mesh.userData.objectId = obj.id;
-      mesh.traverse((c) => {
-        c.userData.objectId = obj.id;
+    this.loadedScene = scene;
+
+    // Position the ground + grid at the scene's floor level.
+    this.ground.position.y = scene.groundY;
+    this.gridHelper.position.y = scene.groundY + 0.001;
+
+    for (const m of scene.meshes) {
+      tagTree(m.object3d, m.id);
+      m.object3d.traverse((c) => {
+        const mesh = c as THREE.Mesh;
+        if (mesh.isMesh) {
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+        }
       });
-      this.scene.add(mesh);
-      this.objects.set(obj.id, { id: obj.id, spec: obj, mesh, bodyHandle: null });
+      this.scene.add(m.object3d);
+      this.objects.set(m.id, { id: m.id, loaded: m, bodyHandle: null });
+    }
+
+    if (scene.cameraHint) {
+      const p = scene.cameraHint.position;
+      const t = scene.cameraHint.target;
+      this.camera.position.set(p[0], p[1], p[2]);
+      this.camera.lookAt(t[0], t[1], t[2]);
     }
   }
 
-  private async buildMeshFor(obj: SceneObject, baseUrl: string): Promise<THREE.Object3D> {
-    if (obj.mesh.startsWith("primitive:")) return buildPrimitiveMesh(obj);
-    const url = baseUrl ? new URL(obj.mesh, baseUrl).toString() : obj.mesh;
-    try {
-      const loader = new GLTFLoader();
-      const gltf = await loader.loadAsync(url);
-      const root = gltf.scene ?? gltf.scenes?.[0];
-      if (!root) throw new Error(`glTF at ${url} has no scene`);
-      root.traverse((c) => {
-        if ((c as THREE.Mesh).isMesh) {
-          (c as THREE.Mesh).castShadow = true;
-          (c as THREE.Mesh).receiveShadow = true;
-        }
-      });
-      return root;
-    } catch (e) {
-      console.warn(`mesh ${url} failed to load; falling back to primitive`, e);
-      return buildPrimitiveMesh({ ...obj, mesh: `primitive:${obj.collider.shape}` });
-    }
+  currentScene(): LoadedScene | null {
+    return this.loadedScene;
   }
 
   clear(): void {
     for (const rec of this.objects.values()) {
-      this.scene.remove(rec.mesh);
-      disposeRecursive(rec.mesh);
+      this.scene.remove(rec.loaded.object3d);
+      disposeRecursive(rec.loaded.object3d);
     }
     this.objects.clear();
     this.clearHighlight();
@@ -170,8 +170,8 @@ export class Viewer {
     if (id === null) return;
     const rec = this.objects.get(id);
     if (!rec) return;
-    this.highlightTarget = rec.mesh;
-    rec.mesh.traverse((c) => {
+    this.highlightTarget = rec.loaded.object3d;
+    rec.loaded.object3d.traverse((c) => {
       if ((c as THREE.Mesh).isMesh) {
         const mesh = c as THREE.Mesh;
         this.originalMaterials.set(mesh, mesh.material);
@@ -205,17 +205,23 @@ export class Viewer {
   }
 
   pick(clientX: number, clientY: number): ObjectRecord | null {
+    return this.pickHit(clientX, clientY)?.record ?? null;
+  }
+
+  pickHit(clientX: number, clientY: number): PickHit | null {
     const ndc = new THREE.Vector2();
     this.ndcFromPixel(clientX, clientY, ndc);
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(ndc, this.camera);
     const meshes: THREE.Object3D[] = [];
-    for (const rec of this.objects.values()) meshes.push(rec.mesh);
+    for (const rec of this.objects.values()) meshes.push(rec.loaded.object3d);
     const hits = raycaster.intersectObjects(meshes, true);
     if (hits.length === 0) return null;
     const id = hits[0].object.userData.objectId as string | undefined;
     if (!id) return null;
-    return this.objects.get(id) ?? null;
+    const record = this.objects.get(id);
+    if (!record) return null;
+    return { record, point: hits[0].point.clone() };
   }
 
   planeIntersect(clientX: number, clientY: number, height: number): THREE.Vector3 | null {
@@ -225,8 +231,26 @@ export class Viewer {
     raycaster.setFromCamera(ndc, this.camera);
     const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -height);
     const hit = new THREE.Vector3();
-    if (raycaster.ray.intersectPlane(plane, hit)) return hit;
-    return null;
+    if (!raycaster.ray.intersectPlane(plane, hit)) return null;
+    if (
+      Math.abs(hit.x) > INTERACTION_HALF_EXTENT ||
+      Math.abs(hit.z) > INTERACTION_HALF_EXTENT
+    ) {
+      return null;
+    }
+    return hit;
+  }
+
+  surfaceIntersect(clientX: number, clientY: number): THREE.Intersection | null {
+    const ndc = new THREE.Vector2();
+    this.ndcFromPixel(clientX, clientY, ndc);
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(ndc, this.camera);
+    const targets: THREE.Object3D[] = [this.ground];
+    for (const rec of this.objects.values()) targets.push(rec.loaded.object3d);
+    const hits = raycaster.intersectObjects(targets, true);
+    if (hits.length === 0) return null;
+    return hits[0];
   }
 
   dispose(): void {
@@ -234,6 +258,13 @@ export class Viewer {
     this.clear();
     this.renderer.dispose();
   }
+}
+
+function tagTree(root: THREE.Object3D, id: string) {
+  root.userData.objectId = id;
+  root.traverse((c) => {
+    c.userData.objectId = id;
+  });
 }
 
 function disposeRecursive(obj: THREE.Object3D): void {

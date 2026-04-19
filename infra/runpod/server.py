@@ -37,6 +37,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 WEIGHTS_DIR = Path(os.environ.get("WEIGHTS_DIR", "/workspace/weights"))
 ENABLE_INFERENCE = os.environ.get("VID2SIM_POD_INFERENCE", "1") == "1"
 ALLOWED_MODELS = {"hunyuan3d", "triposg", "sf3d"}
+_da3_handle: object | None = None  # populated lazily on first /depth call
 
 app = FastAPI(title="VID2SIM mesh-gen", version="1.0")
 
@@ -113,6 +114,62 @@ async def mesh(
             "X-Vid2Sim-Model": model,
             "X-Vid2Sim-GenSeconds": f"{dt:.3f}",
             "X-Vid2Sim-PodId": os.environ.get("RUNPOD_POD_ID", "unknown"),
+        },
+    )
+
+
+@app.post("/depth")
+async def depth(rgb: UploadFile = File(...)) -> Response:
+    """Return DA3 metric depth as numpy .npy bytes.
+
+    Body: multipart/form-data with `rgb` (jpeg bytes).
+    Response: application/octet-stream — numpy float32 array, HxW, metres.
+    Headers: X-Vid2Sim-DepthShape, X-Vid2Sim-DepthMin, X-Vid2Sim-DepthMax.
+    """
+    global _da3_handle
+
+    if not ENABLE_INFERENCE:
+        raise HTTPException(status_code=503,
+                            detail="inference disabled via VID2SIM_POD_INFERENCE=0")
+
+    rgb_bytes = await rgb.read()
+    if not rgb_bytes:
+        raise HTTPException(status_code=400, detail="empty rgb")
+
+    if _da3_handle is None:
+        logger.info("loading DA3 model from %s ...", WEIGHTS_DIR)
+        try:
+            from models_da3 import load as _da3_load  # type: ignore
+            _da3_handle = _da3_load(WEIGHTS_DIR)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("DA3 load failed")
+            raise HTTPException(status_code=503,
+                                detail=f"DA3 load failed: {exc}") from exc
+
+    t0 = time.monotonic()
+    try:
+        import numpy as np  # noqa: F401
+        depth_arr = _da3_handle.predict(rgb_bytes)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("DA3 inference failed")
+        raise HTTPException(status_code=503,
+                            detail=f"DA3 inference failed: {exc}") from exc
+    dt = time.monotonic() - t0
+
+    import numpy as np
+    buf = io.BytesIO()
+    np.save(buf, depth_arr, allow_pickle=False)
+    body = buf.getvalue()
+    logger.info("served depth in %.2fs (%d bytes, shape=%s)",
+                dt, len(body), depth_arr.shape)
+    return Response(
+        content=body,
+        media_type="application/octet-stream",
+        headers={
+            "X-Vid2Sim-DepthShape": f"{depth_arr.shape[0]},{depth_arr.shape[1]}",
+            "X-Vid2Sim-DepthMin": f"{float(depth_arr.min()):.3f}",
+            "X-Vid2Sim-DepthMax": f"{float(depth_arr.max()):.3f}",
+            "X-Vid2Sim-DepthSeconds": f"{dt:.3f}",
         },
     )
 

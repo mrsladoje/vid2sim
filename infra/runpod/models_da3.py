@@ -55,8 +55,10 @@ class _DA3Handle:
         rgb = Image.open(io.BytesIO(rgb_bytes)).convert("RGB")
         orig_size = rgb.size  # (W, H)
 
+        # DA3's `inference` first arg is a positional list named `image`
+        # (singular). Per their README example: `model.inference(images,)`.
         with torch.no_grad():
-            pred = self.model.inference(images=[rgb])
+            pred = self.model.inference([rgb])
 
         # `pred.depth` shape is [N, H, W] float32. We send one image so N=1.
         depth = pred.depth

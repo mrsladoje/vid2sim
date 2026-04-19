@@ -17,8 +17,12 @@
 # is supplied at runtime (`--prompts`) and the blob embeds a CLIP-style text
 # encoder. It does NOT have a fixed 80-class head like stock COCO YOLO. When
 # a blob is provided to `capture.py --yolo-blob`, it is loaded into a plain
-# `DetectionNetwork` (no fixed `classes: 80` config). When no blob is given,
-# the class/track masks are emitted as zeros (background) — a valid bundle.
+# `DetectionNetwork` (no fixed `classes: 80` config).
+#
+# **REQUIRED as of PerceptionFrame spec v1.1**: capture.py refuses to run
+# without `--yolo-blob` and `--prompts`, and aborts post-capture if zero
+# tracked objects were emitted across the entire run. Stream 02 cannot
+# reconstruct anything from a bundle without per-object masks.
 
 version: 2
 platform: RVC4
@@ -69,7 +73,7 @@ nodes:
     batch_report_threshold: 1
     max_batch_reports: 10
 
-  # Optional — only instantiated when --yolo-blob is supplied.
+  # REQUIRED as of spec v1.1 — capture.py mandates --yolo-blob.
   - id: yoloe
     type: DetectionNetwork
     blob: "<set via capture.py --yolo-blob>"
@@ -92,7 +96,7 @@ bundle_mapping:
   rgb          -> frames/XXXXX.rgb.jpg        # JPEG q=90
   depth        -> frames/XXXXX.depth.png      # 16-bit PNG, mm
   conf         -> frames/XXXXX.conf.png       # 8-bit PNG
-  mask_class   -> frames/XXXXX.mask_class.png # 8-bit PNG  (zeros when yoloe disabled)
-  mask_track   -> frames/XXXXX.mask_track.png # 16-bit PNG (zeros when yoloe disabled)
+  mask_class   -> frames/XXXXX.mask_class.png # 8-bit PNG  (REQUIRED non-trivial — spec v1.1)
+  mask_track   -> frames/XXXXX.mask_track.png # 16-bit PNG (REQUIRED non-trivial — spec v1.1)
   imu          -> frames/XXXXX.imu.jsonl      # ~26 samples per frame at 15 fps, 400 Hz
-  objects      -> frames/XXXXX.objects.json   # empty list when yoloe disabled
+  objects      -> frames/XXXXX.objects.json   # REQUIRED ≥1 detection across capture (spec v1.1)

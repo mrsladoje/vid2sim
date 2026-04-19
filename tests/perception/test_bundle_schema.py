@@ -1,4 +1,4 @@
-"""Validate a PerceptionFrame bundle against spec/perception_frame.md v1.0."""
+"""Validate a PerceptionFrame bundle against spec/perception_frame.md v1.1."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,12 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from src.perception.bundle import BundleReader, RGB_WIDTH, RGB_HEIGHT
+from src.perception.bundle import (
+    BundleInvariantError,
+    BundleReader,
+    RGB_HEIGHT,
+    RGB_WIDTH,
+)
 
 
 REQUIRED_MANIFEST_KEYS = {
@@ -79,3 +84,52 @@ def test_bundle_reader_round_trips(stub_bundle: Path) -> None:
     assert rec.mask_track.dtype == np.uint16
     assert isinstance(rec.imu, list) and len(rec.imu) > 0
     assert isinstance(rec.objects, list)
+
+
+# ── spec v1.1 validator ────────────────────────────────────────────────
+
+
+def test_validate_passes_on_segmented_stub(stub_bundle: Path) -> None:
+    """The stub generator emits real tracks → must pass v1.1 invariants."""
+    BundleReader(stub_bundle).validate()  # raises if invalid
+
+
+def test_validate_fails_when_objects_json_all_empty(
+    tmp_path: Path, stub_bundle: Path
+) -> None:
+    """Strip all detections → validate must reject the bundle."""
+    import shutil
+    target = tmp_path / "no_objects"
+    shutil.copytree(stub_bundle, target)
+    for objs_file in (target / "frames").glob("*.objects.json"):
+        objs_file.write_text("[]")
+    with pytest.raises(BundleInvariantError, match="objects.json"):
+        BundleReader(target).validate()
+
+
+def test_validate_fails_when_mask_track_all_zero(
+    tmp_path: Path, stub_bundle: Path
+) -> None:
+    """Wipe the track masks → validate must reject the bundle."""
+    import shutil
+    target = tmp_path / "no_tracks"
+    shutil.copytree(stub_bundle, target)
+    blank = np.zeros((RGB_HEIGHT, RGB_WIDTH), dtype=np.uint16)
+    for mt in (target / "frames").glob("*.mask_track.png"):
+        Image.fromarray(blank, mode="I;16").save(mt)
+    # Keep objects.json non-empty so we hit the mask check, not the
+    # objects check.
+    with pytest.raises(BundleInvariantError, match="mask_track"):
+        BundleReader(target).validate()
+
+
+def test_validate_fails_on_missing_sidecar_file(
+    tmp_path: Path, stub_bundle: Path
+) -> None:
+    """Delete one frame's pose.json → validate must reject the bundle."""
+    import shutil
+    target = tmp_path / "missing_sidecar"
+    shutil.copytree(stub_bundle, target)
+    (target / "frames" / "00003.pose.json").unlink()
+    with pytest.raises(BundleInvariantError, match="missing .pose.json"):
+        BundleReader(target).validate()

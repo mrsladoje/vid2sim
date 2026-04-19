@@ -1,10 +1,23 @@
-# PerceptionFrame Bundle Specification v1.0
+# PerceptionFrame Bundle Specification v1.1
 
 This specification defines the exact structure and format of the dataset emitted by Stream 1 (Perception) to be consumed downstream by Stream 2 (Reconstruction) and others.
 
 This format provides an anti-corruption layer. Downstream contexts only parse these files and do not access the DepthAI or camera API directly.
 
-**Status: Frozen as of Phase G0.**
+**Status: v1.1 — segmentation invariants now mandatory (was optional in v1.0).**
+
+## Bundle Validity Invariants (v1.1)
+
+A bundle is **invalid** and MUST be rejected by downstream consumers if any of the following are violated:
+
+1. **Per-object segmentation is mandatory.** At least one frame's `mask_track.png` MUST contain a non-zero pixel, and at least one frame's `objects.json` MUST contain at least one entry. A capture without tracked objects produces no `ReconstructedObject`s and is therefore unusable for Stream 02.
+2. **`class_prompts` must reflect reality.** The labels in `capture_manifest.json::class_prompts` MUST match the open-vocab prompts passed to the segmenter at capture time, and SHOULD describe the actual scene contents.
+3. **Frame integers monotonic + zero-padded.** Every frame must use the `XXXXX` 5-digit prefix and integers must form a contiguous range starting at `00000`.
+4. **All declared per-frame files must exist.** Missing any of `rgb.jpg`, `depth.png`, `conf.png`, `mask_class.png`, `mask_track.png`, `pose.json`, `imu.jsonl`, `objects.json` for a present frame index is a hard error.
+
+`pose.json` containing identity translation + identity quaternion is acceptable in v1.1 (VIO not yet online); downstream code falls back to stereo-only depth when poses are degenerate.
+
+`src/perception/bundle.py::BundleReader.validate()` enforces these invariants — call it before consuming a bundle.
 
 ## Directory Structure
 

@@ -7,12 +7,14 @@ PerceptionFrame bundle to disk via `bundle.BundleWriter`.
 
 Usage:
     python -m src.perception.capture --outdir data/captures/hero_01 --duration 10 \
-        --prompts chair
+        --prompts bottle popcorn_cup --yolo-blob /path/to/yoloe26.blob
 
-YOLOE-26 open-vocab segmentation is optional: if `--yolo-blob` is given the
-blob is loaded into a DetectionNetwork and class/track masks are populated
-from the detections; otherwise the masks stay zeroed (`0 = background`, per
-spec) and the capture still produces valid RGB/depth/conf/IMU data.
+YOLOE-26 open-vocab segmentation is REQUIRED (per PerceptionFrame spec
+v1.1): downstream Stream 02 reconstruction needs per-object class/track
+masks + object metadata to do per-instance mesh generation. A capture
+without these is unusable — `--yolo-blob` and `--prompts` are mandatory,
+and the run aborts if the segmenter produced zero tracked objects across
+the entire session.
 """
 
 from __future__ import annotations
@@ -69,8 +71,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--outdir", required=True, help="Output bundle directory")
     p.add_argument("--duration", type=float, default=DEFAULT_DURATION_S, help="Capture seconds")
     p.add_argument("--fps", type=int, default=DEFAULT_FPS, help="Target camera FPS")
-    p.add_argument("--prompts", nargs="+", default=["chair"], help="YOLOE class prompt set")
-    p.add_argument("--yolo-blob", default=None, help="Path to YOLOE-26 blob (optional)")
+    p.add_argument("--prompts", nargs="+", required=True,
+                   help="YOLOE open-vocab class prompts (REQUIRED, e.g. 'bottle popcorn_cup chair')")
+    p.add_argument("--yolo-blob", required=True,
+                   help="Path to YOLOE-26 blob (REQUIRED — per spec v1.1, segmentation is mandatory)")
     p.add_argument("--session-id", default=None, help="Override session_id in manifest")
     p.add_argument("--log-level", default="INFO")
     return p.parse_args(argv)
@@ -199,9 +203,12 @@ def run_capture(args: argparse.Namespace) -> int:
         return 2
     outdir = Path(args.outdir)
     session_id = args.session_id or outdir.name
-    yolo_blob = Path(args.yolo_blob) if args.yolo_blob else None
-    if yolo_blob is not None and not yolo_blob.exists():
-        logger.error("YOLO blob not found: %s", yolo_blob)
+    yolo_blob = Path(args.yolo_blob)
+    if not yolo_blob.exists():
+        logger.error("YOLO blob not found: %s — segmentation is mandatory per spec v1.1", yolo_blob)
+        return 2
+    if not args.prompts:
+        logger.error("--prompts must contain at least one class label")
         return 2
 
     pipeline, queues = _build_pipeline(args.fps, yolo_blob)
@@ -221,6 +228,7 @@ def run_capture(args: argparse.Namespace) -> int:
         frame_idx = 0
         last_imu_ts_ns = 0
         imu_buffer: list[ImuSample] = []
+        total_tracked_objects = 0  # spec v1.1: must be > 0 across the capture
 
         # Signal handling so Ctrl+C still flushes the manifest.
         interrupted = {"flag": False}
@@ -291,11 +299,27 @@ def run_capture(args: argparse.Namespace) -> int:
                 imu=imu_samples,
                 objects=objects,
             ))
+            total_tracked_objects += len(objects)
             frame_idx += 1
 
         writer.close()
         logger.info("Wrote %d frames to %s (interrupted=%s)", writer.n_written, outdir, interrupted["flag"])
-        return 0 if writer.n_written > 0 else 1
+        if writer.n_written == 0:
+            return 1
+        # Spec v1.1 invariant: a bundle without any tracked detection is
+        # unusable downstream. Fail loud now rather than ship a dead bundle.
+        if total_tracked_objects == 0:
+            logger.error(
+                "INVARIANT VIOLATION: 0 tracked objects across %d frames. "
+                "Check the YOLOE blob, prompts (%s), and that the scene "
+                "actually contains the prompted classes. Bundle written but "
+                "marked invalid.",
+                writer.n_written, args.prompts,
+            )
+            return 3
+        logger.info("Capture invariant OK: %d total tracked-object detections across %d frames",
+                    total_tracked_objects, writer.n_written)
+        return 0
     finally:
         pipeline.stop()
 

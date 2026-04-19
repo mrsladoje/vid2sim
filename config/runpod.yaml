@@ -7,11 +7,12 @@
 # Secrets (RUNPOD_API_KEY) are read from env vars; never commit them.
 
 endpoint:
-  # Override via env RUNPOD_ENDPOINT at runtime. The default is a
-  # placeholder that MUST be overwritten before a live demo.
-  url: "https://REPLACE_ME.proxy.runpod.net"
+  # Override via env RUNPOD_ENDPOINT at runtime. Live A100 80GB pod
+  # serving SF3D (primary), TripoSG, Hunyuan3D, and DA3MONO-LARGE.
+  url: "https://melj7r6bqvfp7o-8000.proxy.runpod.net"
   healthz_path: "/healthz"
   mesh_path: "/mesh"
+  depth_path: "/depth"
 
 pod:
   preferred_region: "EU-RO-1"
@@ -24,14 +25,18 @@ pod:
 
 client:
   # Per-request budget. Exceeding this trips the SF3D local fallback.
-  request_timeout_s: 25.0
+  # SF3D warm = 3-5 s; TripoSG warm = 5-15 s; Hunyuan3D warm = 30-65 s.
+  # Bumped to 90 s so all three models fit warm; cold loads still need
+  # the SSH-tunnel path to dodge Cloudflare's 100 s cap.
+  request_timeout_s: 90.0
   connect_timeout_s: 5.0
   retries_per_call: 1
   # Wire format. ADR-009 open-q: raw glb now; switch to presigned URL if
   # payloads start exceeding a few MB.
   wire_format: "raw_glb"
-  # Which in-pod model to call first.
-  primary_model: "hunyuan3d"       # "hunyuan3d" | "triposg"
+  # Which in-pod model to call first. SF3D ships native UV-mapped PBR
+  # textures end-to-end without bpy — best ratio of quality to latency.
+  primary_model: "sf3d"            # "sf3d" | "triposg" | "hunyuan3d"
   fallback_model: "triposg"
 
 watchdog:

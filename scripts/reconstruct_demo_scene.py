@@ -27,6 +27,7 @@ import trimesh
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from perception.bundle import BundleInvariantError, BundleReader  # noqa: E402
 from reconstruction.batch import reconstruct_session  # noqa: E402
 from reconstruction.hero_orchestrator import ReconstructorConfig  # noqa: E402
 from reconstruction.pod_watchdog import PodWatchdog  # noqa: E402
@@ -74,10 +75,25 @@ def main() -> int:
     parser.add_argument("--max-objects", type=int, default=5)
     parser.add_argument("--offline", action="store_true",
                         help="Skip RunPod; use local unit-cube emitter.")
+    parser.add_argument("--skip-validation", action="store_true",
+                        help="Bypass BundleReader.validate() — DANGEROUS, use only for debugging.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+
+    # Per spec v1.1, fail fast if the bundle is missing per-object
+    # segmentation rather than burn pod minutes on a doomed run.
+    if not args.skip_validation:
+        try:
+            BundleReader(args.capture).validate()
+            logging.info("Bundle %s passed v1.1 invariants", args.capture)
+        except BundleInvariantError as exc:
+            logging.error("Bundle invariant violation: %s", exc)
+            logging.error("Fix the capture (re-run with --yolo-blob and "
+                          "matching --prompts) or pass --skip-validation "
+                          "to bypass this check.")
+            return 4
 
     cfg = ReconstructorConfig(out_root=args.out)
 

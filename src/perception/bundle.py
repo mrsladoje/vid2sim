@@ -27,6 +27,12 @@ RGB_WIDTH = 1920
 RGB_HEIGHT = 1080
 
 
+class BundleInvariantError(ValueError):
+    """Raised by ``BundleReader.validate`` when a bundle violates the
+    PerceptionFrame v1.1 invariants (no per-object segmentation,
+    non-contiguous frames, missing sidecar files, etc.)."""
+
+
 @dataclass
 class ImuSample:
     timestamp_ns: int
@@ -216,6 +222,67 @@ class BundleReader:
     def __iter__(self) -> Iterator[FrameRecord]:
         for i, _prefix in enumerate(self._prefixes):
             yield self.read(i)
+
+    def validate(self) -> None:
+        """Enforce the v1.1 bundle invariants.
+
+        Raises ``BundleInvariantError`` if the bundle is missing per-object
+        segmentation, has discontinuous frame indices, or fails any of the
+        guarantees Stream 02 depends on. Cheap (one pass, no decode of RGB
+        or depth data — just opens the small files).
+        """
+        # 1. Frame indices contiguous from 00000.
+        if not self._prefixes:
+            raise BundleInvariantError(f"{self.root}: bundle has zero frames")
+        for expected, actual in enumerate(self._prefixes):
+            if int(actual) != expected:
+                raise BundleInvariantError(
+                    f"{self.root}: non-contiguous frame indices "
+                    f"(expected {expected:05d}, found {actual})"
+                )
+
+        # 2. Existence check — fast, must visit every frame.
+        for prefix_str in self._prefixes:
+            prefix = self.frames_dir / prefix_str
+            for suffix in (".rgb.jpg", ".depth.png", ".conf.png",
+                           ".mask_class.png", ".mask_track.png",
+                           ".pose.json", ".objects.json"):
+                if not prefix.with_suffix(suffix).exists():
+                    raise BundleInvariantError(
+                        f"{self.root}: frame {prefix_str} missing {suffix}"
+                    )
+
+        # 3. Content check — short-circuit as soon as both invariants pass.
+        any_object = False
+        any_track_pixel = False
+        for prefix_str in self._prefixes:
+            prefix = self.frames_dir / prefix_str
+            if not any_object:
+                objs = json.loads(prefix.with_suffix(".objects.json").read_text())
+                if objs:
+                    any_object = True
+            if not any_track_pixel:
+                # PIL's getextrema() on a single-channel image returns (min, max).
+                mt_extrema = Image.open(prefix.with_suffix(".mask_track.png")).getextrema()
+                if mt_extrema and mt_extrema[1] > 0:
+                    any_track_pixel = True
+            if any_object and any_track_pixel:
+                break
+
+        if not any_object:
+            raise BundleInvariantError(
+                f"{self.root}: spec v1.1 requires at least one objects.json "
+                f"with a detection across the capture (found 0 across "
+                f"{len(self._prefixes)} frames). Re-capture with --yolo-blob "
+                f"and matching --prompts."
+            )
+        if not any_track_pixel:
+            raise BundleInvariantError(
+                f"{self.root}: spec v1.1 requires at least one non-zero pixel "
+                f"in a mask_track.png across the capture (found 0). The "
+                f"segmenter likely never wrote a track mask; check the YOLOE "
+                f"blob is loaded and prompts match the scene."
+            )
 
     def read(self, idx: int) -> FrameRecord:
         prefix = self.frames_dir / self._prefixes[idx]

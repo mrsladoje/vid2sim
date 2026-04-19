@@ -158,6 +158,15 @@ if [ ! -f "$VENV_STAMP" ]; then
         git clone -q --depth 1 https://github.com/Stability-AI/stable-fast-3d.git \
             "$WEIGHTS_DIR/src/stable-fast-3d"
     fi
+    if [ ! -d "$WEIGHTS_DIR/src/Depth-Anything-3" ]; then
+        git clone -q --depth 1 https://github.com/ByteDance-Seed/Depth-Anything-3.git \
+            "$WEIGHTS_DIR/src/Depth-Anything-3"
+    fi
+    # DA3 ships as a Python package — install it editable so the
+    # `depth_anything_3` import resolves.
+    (cd "$WEIGHTS_DIR/src/Depth-Anything-3" && \
+        "$PIPBIN" install --no-build-isolation -q -e . \
+        || log "  (Depth-Anything-3 editable install warned)")
 
     # Install each repo's requirements.txt, filtering out pins that abort
     # pip (bpy==4.0 not available on PyPI for py3.11; diso needs no-build

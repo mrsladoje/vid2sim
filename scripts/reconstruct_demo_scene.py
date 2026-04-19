@@ -77,6 +77,9 @@ def main() -> int:
                         help="Skip RunPod; use local unit-cube emitter.")
     parser.add_argument("--skip-validation", action="store_true",
                         help="Bypass BundleReader.validate() — DANGEROUS, use only for debugging.")
+    parser.add_argument("--model", default=None,
+                        help="Override mesh model (sf3d | triposg | hunyuan3d). "
+                             "Default: read client.primary_model from --config.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -95,14 +98,24 @@ def main() -> int:
                           "to bypass this check.")
             return 4
 
-    cfg = ReconstructorConfig(out_root=args.out)
+    # Resolve primary model: CLI > yaml > ReconstructorConfig default.
+    resolved_model = args.model
+    rcfg = None
+    if args.config is not None and not args.offline:
+        rcfg = RunPodConfig.from_yaml(args.config)
+        if resolved_model is None:
+            resolved_model = rcfg.primary_model
+    if resolved_model is None:
+        resolved_model = "sf3d"  # safest default — fastest warm path
+    logging.info("Mesh model: %s", resolved_model)
+    cfg = ReconstructorConfig(out_root=args.out, primary_model=resolved_model)
 
     watchdog = None
     client_ctx = None
     if args.offline or args.config is None:
         client = _local_box_client()
     else:
-        rcfg = RunPodConfig.from_yaml(args.config)
+        assert rcfg is not None
         if "REPLACE_ME" in rcfg.endpoint:
             logging.warning("config/runpod.yaml endpoint is a placeholder; "
                             "switching to offline stub emitter.")

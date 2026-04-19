@@ -50,25 +50,26 @@ class _DA3Handle:
         rgb = Image.open(io.BytesIO(rgb_bytes)).convert("RGB")
         orig_size = rgb.size  # (W, H)
 
-        # Important: keep inputs fp32. Some Depth Anything fp16 weights
-        # underflow on fp16 inputs and emit all-zero depth. Use autocast
-        # for the forward pass instead — that gives us fp16 perf without
-        # the input-cast pitfall.
         inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)
-        amp_enabled = (self.device == "cuda" and self.dtype == torch.float16)
+        # Diagnostics: confirm the processed input actually has signal.
+        pv = inputs["pixel_values"]
+        logger.info("DA3 input pixel_values shape=%s dtype=%s "
+                    "min=%.3f max=%.3f mean=%.3f",
+                    tuple(pv.shape), pv.dtype, float(pv.min()),
+                    float(pv.max()), float(pv.mean()))
+
+        # Pure fp32 forward — autocast triggers all-zero output on the
+        # V2 Metric Indoor Large checkpoint (observed empirically).
         with torch.no_grad():
-            if amp_enabled:
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    outputs = self.model(**inputs)
-            else:
-                outputs = self.model(**inputs)
+            outputs = self.model(**inputs)
         depth = outputs.predicted_depth  # (1, H, W) or (1, 1, H, W)
         if depth.dim() == 4:
             depth = depth.squeeze(1)
         depth = depth.squeeze(0).float().cpu().numpy().astype(np.float32)
 
-        logger.info("DA3 raw depth range: %.4f .. %.4f (shape %s)",
-                    float(depth.min()), float(depth.max()), depth.shape)
+        logger.info("DA3 raw depth range: %.4f .. %.4f (shape %s, mean %.4f)",
+                    float(depth.min()), float(depth.max()), depth.shape,
+                    float(depth.mean()))
 
         # Resize back to the input resolution (HF processors normally
         # downsample to ~518 on the long edge).

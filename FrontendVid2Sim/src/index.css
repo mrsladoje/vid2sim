@@ -1,0 +1,48 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-textPrimary font-sans overflow-x-hidden;
+    background-image: 
+      radial-gradient(circle at 50% 0%, rgba(228, 107, 69, 0.05) 0%, transparent 50%),
+      radial-gradient(circle at 100% 100%, rgba(228, 107, 69, 0.03) 0%, transparent 50%);
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-surface/60 backdrop-blur-md border border-border rounded-2xl shadow-xl;
+  }
+  
+  .glass-button {
+    @apply bg-white/5 hover:bg-white/10 backdrop-blur-sm border md:border-border transition-all duration-300 rounded-full px-6 py-2.5 text-sm font-medium tracking-wide flex items-center justify-center gap-2;
+  }
+
+  .primary-button {
+    @apply bg-primary/20 hover:bg-primary/30 text-primary border border-primary/30 hover:border-primary/50 shadow-[0_0_15px_rgba(228,107,69,0.15)] hover:shadow-[0_0_20px_rgba(228,107,69,0.3)] backdrop-blur-sm transition-all duration-300 rounded-full px-6 py-3 text-sm font-semibold tracking-wide flex items-center justify-center gap-2;
+  }
+
+  .primary-button-solid {
+    @apply bg-primary hover:bg-primaryHover text-white rounded-full font-semibold tracking-wide flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(228,107,69,0.3)] hover:shadow-[0_0_28px_rgba(228,107,69,0.5)] transition-shadow;
+  }
+  
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-white to-white/50;
+  }
+  
+  .primary-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-[#FF8C66] to-[#E46B45];
+  }
+
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .hide-scrollbar {
+    -ms-overflow-style: none; /* IE and Edge */
+    scrollbar-width: none; /* Firefox */
+  }
+}

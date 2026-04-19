@@ -1,9 +1,5 @@
 import * as THREE from "three";
-import { SceneObject } from "./types/scene";
-
-// For the example fixture and placeholder demo scene, the schema allows
-// `mesh: "primitive:<name>"` URIs. When Person 3 ships real glb files from
-// Hunyuan3D/TripoSG, the loader resolves those instead. Same code path.
+import type { SceneObject } from "./types";
 
 const MATERIAL_COLORS: Record<string, number> = {
   wood: 0x8b5a2b,
@@ -76,15 +72,12 @@ export function buildPrimitiveMesh(obj: SceneObject): THREE.Object3D {
 
 function buildChair(mat: THREE.MeshStandardMaterial): THREE.Object3D {
   const g = new THREE.Group();
-  const seatGeo = new THREE.BoxGeometry(0.45, 0.05, 0.45);
-  const seat = new THREE.Mesh(seatGeo, mat);
-  seat.position.y = 0;
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.05, 0.45), mat);
   seat.castShadow = true;
   seat.receiveShadow = true;
   g.add(seat);
 
-  const backGeo = new THREE.BoxGeometry(0.45, 0.5, 0.04);
-  const back = new THREE.Mesh(backGeo, mat);
+  const back = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.5, 0.04), mat);
   back.position.set(0, 0.275, -0.2);
   back.castShadow = true;
   g.add(back);
@@ -106,8 +99,7 @@ function buildChair(mat: THREE.MeshStandardMaterial): THREE.Object3D {
 
 function buildTable(mat: THREE.MeshStandardMaterial): THREE.Object3D {
   const g = new THREE.Group();
-  const topGeo = new THREE.BoxGeometry(1.2, 0.05, 0.8);
-  const top = new THREE.Mesh(topGeo, mat);
+  const top = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.05, 0.8), mat);
   top.position.y = 0.375;
   top.castShadow = true;
   top.receiveShadow = true;

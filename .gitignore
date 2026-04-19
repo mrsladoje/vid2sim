@@ -26,6 +26,7 @@ data/scenes/
 .env
 .env.local
 *.secret
+node_modules/
 
 # Local tooling (per-machine, not checked in)
 .claude/

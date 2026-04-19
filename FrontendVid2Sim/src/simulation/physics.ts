@@ -1,15 +1,12 @@
 import * as THREE from "three";
 import RAPIER from "@dimforge/rapier3d-compat";
-import { SceneSpec, SceneObject } from "./types/scene";
-import { Viewer, ObjectRecord } from "./viewer";
-
-// Rapier trimesh colliders are primarily static (ADR-004). For dynamic bodies
-// we require a primitive or convex-decomposed collider from the scene spec.
+import type { SceneSpec, SceneObject } from "./types";
+import type { Viewer, ObjectRecord } from "./viewer";
 
 export interface ExtraBody {
   body: RAPIER.RigidBody;
   mesh: THREE.Mesh;
-  ttl?: number; // seconds; undefined = permanent
+  ttl?: number;
 }
 
 export class Physics {
@@ -20,10 +17,15 @@ export class Physics {
   private readonly extras: ExtraBody[] = [];
   private readonly ballMat: THREE.MeshStandardMaterial;
   private bodyIdToObjectId: Map<number, string> = new Map();
+  private gravityOverride: number | null = null;
+  private frictionScale = 1;
+  private readonly viewer: Viewer;
 
-  constructor(private readonly viewer: Viewer) {
+  constructor(viewer: Viewer) {
+    this.viewer = viewer;
     this.ballMat = new THREE.MeshStandardMaterial({
-      color: 0x22cc88,
+      color: 0xe46b45,
+      emissive: 0x2a0f05,
       roughness: 0.35,
       metalness: 0.1,
     });
@@ -35,23 +37,21 @@ export class Physics {
     this.rapier = RAPIER;
   }
 
-  /** (Re)build the physics world from a scene spec. Wires viewer meshes to bodies. */
   buildWorld(spec: SceneSpec): void {
     if (!this.rapier) throw new Error("Physics.init() not called");
     this.teardown();
     this.initialSpec = spec;
 
     const g = spec.world.gravity;
-    this.world = new this.rapier.World({ x: g[0], y: g[1], z: g[2] });
+    const gy = this.gravityOverride ?? g[1];
+    this.world = new this.rapier.World({ x: g[0], y: gy, z: g[2] });
 
-    // Ground plane: static, infinite in effect (large cuboid).
-    const groundBodyDesc = this.rapier.RigidBodyDesc.fixed();
-    const groundBody = this.world.createRigidBody(groundBodyDesc);
-    const groundColliderDesc = this.rapier.ColliderDesc.cuboid(50, 0.05, 50)
+    const groundBody = this.world.createRigidBody(this.rapier.RigidBodyDesc.fixed());
+    const groundCol = this.rapier.ColliderDesc.cuboid(50, 0.05, 50)
       .setTranslation(0, -0.05, 0)
-      .setFriction(spec.ground.material.friction)
+      .setFriction(spec.ground.material.friction * this.frictionScale)
       .setRestitution(spec.ground.material.restitution);
-    this.world.createCollider(groundColliderDesc, groundBody);
+    this.world.createCollider(groundCol, groundBody);
 
     for (const obj of spec.objects) {
       const rec = this.viewer.objects.get(obj.id);
@@ -83,7 +83,7 @@ export class Physics {
 
     const colDesc = this.colliderDescFor(obj);
     colDesc
-      .setFriction(obj.physics.friction)
+      .setFriction(obj.physics.friction * this.frictionScale)
       .setRestitution(obj.physics.restitution)
       .setDensity(this.estimateDensity(obj));
     this.world.createCollider(colDesc, body);
@@ -103,9 +103,6 @@ export class Physics {
       case "box":
       case "mesh":
       default: {
-        // For 'mesh' we currently fall back to the object's bbox as a safety
-        // net — ADR-004/PRD §15.6 require convex decomposition for real
-        // dynamic meshes, which is Person 3's responsibility upstream.
         const he = c.half_extents ?? [0.25, 0.25, 0.25];
         return this.rapier.ColliderDesc.cuboid(he[0], he[1], he[2]);
       }
@@ -113,7 +110,6 @@ export class Physics {
   }
 
   private estimateDensity(obj: SceneObject): number {
-    // Approximate bounding volume from the collider.
     const c = obj.collider;
     let volume: number;
     if (c.shape === "sphere") {
@@ -160,9 +156,7 @@ export class Physics {
       const e = this.extras[i];
       if (e.ttl !== undefined) {
         e.ttl -= dt;
-        if (e.ttl <= 0) {
-          this.removeExtraAt(i);
-        }
+        if (e.ttl <= 0) this.removeExtraAt(i);
       }
     }
   }
@@ -176,7 +170,6 @@ export class Physics {
     this.extras.splice(i, 1);
   }
 
-  /** Drop a ball at a world position with a small initial downward velocity. */
   dropBall(worldPos: THREE.Vector3, radius = 0.08, mass = 0.3): void {
     if (!this.world || !this.rapier) return;
     const desc = this.rapier.RigidBodyDesc.dynamic()
@@ -197,15 +190,26 @@ export class Physics {
     this.extras.push({ body, mesh, ttl: 12 });
   }
 
-  /** Apply an instantaneous impulse at the given object's center of mass. */
   applyImpulse(id: string, impulse: THREE.Vector3): void {
     const body = this.objectBodies.get(id);
     if (!body) return;
     body.applyImpulse({ x: impulse.x, y: impulse.y, z: impulse.z }, true);
   }
 
-  /** Rebuild from the spec used last. */
   reset(): void {
+    if (this.initialSpec) this.buildWorld(this.initialSpec);
+  }
+
+  setGravity(y: number): void {
+    this.gravityOverride = y;
+    if (this.world) {
+      const g = this.world.gravity;
+      this.world.gravity = { x: g.x, y, z: g.z };
+    }
+  }
+
+  setFrictionScale(scale: number): void {
+    this.frictionScale = Math.max(scale, 0);
     if (this.initialSpec) this.buildWorld(this.initialSpec);
   }
 
@@ -225,7 +229,6 @@ export class Physics {
     }
   }
 
-  /** Count of rigid bodies currently in the world (excluding ground). */
   bodyCount(): number {
     if (!this.world) return 0;
     return this.objectBodies.size + this.extras.length;
@@ -235,7 +238,6 @@ export class Physics {
     return this.objectBodies.get(id);
   }
 
-  /** Expose object records registered through viewer for UI consumption. */
   recordsById(): Map<string, ObjectRecord> {
     return this.viewer.objects;
   }

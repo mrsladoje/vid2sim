@@ -1,6 +1,3 @@
-// Scene types — hand-written to match spec/scene.schema.json v1.0.
-// Kept separate from runtime validator so types surface at compile time.
-
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
 

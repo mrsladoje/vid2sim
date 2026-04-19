@@ -269,7 +269,12 @@ def _build_pipeline(
         # with per-instance pixel masks (not just bboxes). Massive quality
         # win for Stream 02 reconstruction.
         try:
-            from depthai_nodes import ParsingNeuralNetwork  # type: ignore
+            # depthai-nodes >= 0.4 relocated ParsingNeuralNetwork into the
+            # `node` submodule; older releases exposed it at the package root.
+            try:
+                from depthai_nodes.node import ParsingNeuralNetwork  # type: ignore
+            except ImportError:
+                from depthai_nodes import ParsingNeuralNetwork  # type: ignore
         except ImportError as exc:
             raise RuntimeError(
                 "depthai_nodes is required for the default Zoo segmentation "
@@ -279,7 +284,11 @@ def _build_pipeline(
             ) from exc
         logger.info("Wiring ParsingNeuralNetwork with Zoo model %s", zoo_model)
         model_desc = dai.NNModelDescription(zoo_model)
-        nn = p.create(ParsingNeuralNetwork).build(rgb_out, model_desc)
+        # Pass the Camera node (not the 1920x1080 rgb_out): ParsingNeuralNetwork
+        # then requests its own correctly-sized 512x288 output for the model
+        # input. Linking the fixed 1080p output directly causes the on-device
+        # NN to throw "Input image size doesn't match the model input size".
+        nn = p.create(ParsingNeuralNetwork).build(cam_rgb, model_desc, fps=fps)
         try:
             nn.setConfidenceThreshold(conf_threshold)  # type: ignore[attr-defined]
         except Exception:

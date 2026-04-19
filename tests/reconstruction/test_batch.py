@@ -178,3 +178,88 @@ def test_batch_watchdog_is_polled(tmp_path: Path) -> None:
     )
     # One pre-check + one after each object = 3
     assert wd.checks == 3
+
+
+def test_batch_auto_picks_richer_non_person_frame(tmp_path: Path) -> None:
+    from reconstruction.batch import reconstruct_session
+    from reconstruction.hero_orchestrator import ReconstructorConfig
+
+    cap = _write_synthetic_bundle(tmp_path, [
+        {"track_id": 1, "class": "person",
+         "bbox2d": [50, 50, 220, 360], "distance_m": 1.5},
+    ])
+    frames = cap / "frames"
+    (frames / "00001.rgb.jpg").write_bytes((frames / "00000.rgb.jpg").read_bytes())
+    depth = np.full((480, 640), 3000, dtype=np.uint16)
+    depth[50:360, 50:220] = 1500
+    depth[80:380, 260:480] = 1800
+    mask_track = np.zeros((480, 640), dtype=np.uint16)
+    mask_track[50:360, 50:220] = 1
+    mask_track[80:380, 260:480] = 2
+    Image.fromarray(depth).save(frames / "00001.depth.png")
+    Image.fromarray(mask_track).save(frames / "00001.mask_track.png")
+    Image.fromarray(np.full((480, 640), 255, dtype=np.uint8)).save(frames / "00001.conf.png")
+    Image.fromarray(np.zeros((480, 640), dtype=np.uint8)).save(frames / "00001.mask_class.png")
+    (frames / "00001.pose.json").write_text((frames / "00000.pose.json").read_text())
+    (frames / "00001.imu.jsonl").write_text("")
+    (frames / "00001.objects.json").write_text(json.dumps([
+        {"track_id": 1, "class": "person", "bbox2d": [50, 50, 220, 360],
+         "bbox3d": {"center": [0, 0, 1.5], "size": [0.4, 0.6, 0.4]}, "conf": 0.9},
+        {"track_id": 2, "class": "chair", "bbox2d": [260, 80, 480, 380],
+         "bbox3d": {"center": [0.3, 0.0, 1.8], "size": [0.5, 0.8, 0.5]}, "conf": 0.92},
+    ]))
+    (cap / "capture_manifest.json").write_text(json.dumps({
+        "session_id": "demo_scene", "frame_count": 2,
+    }))
+
+    client = _FakeClient(_box_glb())
+    report = reconstruct_session(
+        cap, "demo_scene",
+        runpod_client=client,
+        cfg=ReconstructorConfig(out_root=tmp_path / "recon"),
+    )
+
+    assert report.successes == 1
+    assert report.total_objects == 1
+    idx = json.loads((report.session_dir / "reconstructed.json").read_text())
+    assert idx["objects"][0]["class"] == "chair"
+
+
+def test_batch_prefers_valid_non_person_bbox_over_invalid_one(tmp_path: Path) -> None:
+    from reconstruction.batch import reconstruct_session
+    from reconstruction.hero_orchestrator import ReconstructorConfig
+
+    cap = _write_synthetic_bundle(tmp_path, [
+        {"track_id": 1, "class": "person",
+         "bbox2d": [50, 50, 220, 360], "distance_m": 1.5},
+        {"track_id": 2, "class": "tv",
+         "bbox2d": [-10, 0, 9999, 9999], "distance_m": 1.8},
+    ])
+    frames = cap / "frames"
+    (frames / "00001.rgb.jpg").write_bytes((frames / "00000.rgb.jpg").read_bytes())
+    depth = np.full((480, 640), 3000, dtype=np.uint16)
+    depth[200:320, 400:520] = 1200
+    mask_track = np.zeros((480, 640), dtype=np.uint16)
+    mask_track[200:320, 400:520] = 2
+    Image.fromarray(depth).save(frames / "00001.depth.png")
+    Image.fromarray(mask_track).save(frames / "00001.mask_track.png")
+    Image.fromarray(np.full((480, 640), 255, dtype=np.uint8)).save(frames / "00001.conf.png")
+    Image.fromarray(np.zeros((480, 640), dtype=np.uint8)).save(frames / "00001.mask_class.png")
+    (frames / "00001.pose.json").write_text((frames / "00000.pose.json").read_text())
+    (frames / "00001.imu.jsonl").write_text("")
+    (frames / "00001.objects.json").write_text(json.dumps([
+        {"track_id": 2, "class": "cell phone", "bbox2d": [400, 200, 520, 320],
+         "bbox3d": {"center": [0.2, 0.0, 1.2], "size": [0.1, 0.2, 0.05]}, "conf": 0.92},
+    ]))
+    (cap / "capture_manifest.json").write_text(json.dumps({
+        "session_id": "demo_scene", "frame_count": 2,
+    }))
+
+    report = reconstruct_session(
+        cap, "demo_scene",
+        runpod_client=_FakeClient(_box_glb()),
+        cfg=ReconstructorConfig(out_root=tmp_path / "recon"),
+    )
+
+    idx = json.loads((report.session_dir / "reconstructed.json").read_text())
+    assert idx["objects"][0]["class"] == "cell_phone"

@@ -139,6 +139,11 @@ export default function ProcessingScreen({ jobId, onComplete }: ProcessingScreen
       : isReal
         ? 'live pipeline · 3 stages'
         : 'pipeline running · 3 stages (stub)';
+  const captureHint = isReal && job?.state === 'capturing'
+    ? (job.elapsed_s < 5
+        ? 'Hold steady. IMU warmup takes about 4 seconds before capture starts.'
+        : 'Hold steady. Live OAK capture is in progress.')
+    : null;
 
   return (
     <div className="w-full flex-1 flex flex-col items-center justify-center relative py-16 min-h-[calc(100vh-5.25rem)] px-4">
@@ -203,6 +208,15 @@ export default function ProcessingScreen({ jobId, onComplete }: ProcessingScreen
             </div>
 
             <div className="flex flex-col gap-4">
+              {captureHint && (
+                <motion.div
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="px-3 py-2 rounded-lg border border-yellow-500/30 bg-yellow-500/8 text-yellow-100 text-xs font-mono leading-relaxed"
+                >
+                  {captureHint}
+                </motion.div>
+              )}
               <div className="flex flex-col gap-2">
                 {steps.map((step, i) => {
                   const state =

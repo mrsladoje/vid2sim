@@ -9,8 +9,6 @@ import {
   Square,
   Video,
   VideoOff,
-  RotateCcw,
-  ArrowRight,
   AlertTriangle,
   Camera,
 } from 'lucide-react';
@@ -34,42 +32,13 @@ interface UploadSectionProps {
 }
 
 type SourceMode = 'live' | 'upload';
-type LiveState = 'init' | 'preview' | 'recording' | 'review' | 'error';
-
-/**
- * Pick the highest-fidelity MediaRecorder mime type the browser actually
- * supports. Falls back to the empty string (browser picks its default).
- */
-function pickRecorderMime(): string {
-  if (typeof MediaRecorder === 'undefined') return '';
-  const candidates = [
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-    'video/mp4',
-  ];
-  for (const m of candidates) {
-    if (MediaRecorder.isTypeSupported(m)) return m;
-  }
-  return '';
-}
+type LiveState = 'init' | 'preview' | 'recording' | 'error';
 
 function formatElapsed(ms: number): string {
   const total = Math.floor(ms / 1000);
   const s = total % 60;
   const m = Math.floor(total / 60);
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-}
-
-function captureFilename(): string {
-  const d = new Date();
-  const pad = (n: number) => n.toString().padStart(2, '0');
-  return (
-    `oak4_capture_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}` +
-    `_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.webm`
-  );
 }
 
 /**
@@ -118,23 +87,22 @@ export default function UploadSection({
   // --- live tab state ---
   const [liveState, setLiveState] = useState<LiveState>('init');
   const [mediaErr, setMediaErr] = useState<string | null>(null);
-  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
-  const [recordedUrl, setRecordedUrl] = useState<string | null>(null);
-  const [recordedName, setRecordedName] = useState<string>('');
   const [elapsed, setElapsed] = useState(0);
   const [devicePath, setDevicePath] = useState<string>('webcam·default');
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [oakHint, setOakHint] = useState<string | null>(null);
+  const [cameraStarting, setCameraStarting] = useState(false);
+  const [pipelineKickError, setPipelineKickError] = useState<string | null>(null);
+  const [pipelineStarting, setPipelineStarting] = useState(false);
 
   const livePreviewRef = useRef<HTMLVideoElement>(null);
-  const playbackRef = useRef<HTMLVideoElement>(null);
   const bridgeImgRef = useRef<HTMLImageElement | null>(null);
   const bridgeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const bridgeRafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+  const activeJobIdRef = useRef<string | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
   const tickStartRef = useRef<number>(0);
   const tickRafRef = useRef<number | null>(null);
   const devicesEnumeratedRef = useRef<boolean>(false);
@@ -143,7 +111,7 @@ export default function UploadSection({
   useEffect(() => { bridgeActiveRef.current = bridgeActive; }, [bridgeActive]);
 
   // ------------------------------------------------------------------
-  // Camera lifecycle: start when mode=='live' and we're not reviewing.
+  // Camera lifecycle.
   // ------------------------------------------------------------------
   const stopBridge = useCallback(() => {
     if (bridgeRafRef.current !== null) {
@@ -304,8 +272,7 @@ export default function UploadSection({
    * and auto-switch to the OAK if present.
    */
   const startCamera = useCallback(
-    async (preferredDeviceId?: string | null) => {
-      setLiveState('init');
+    async (preferredDeviceId?: string | null): Promise<MediaStream | null> => {
       setMediaErr(null);
       stopStream();
 
@@ -321,7 +288,7 @@ export default function UploadSection({
             setDevicePath('OAK · IP bridge · 1280×720@30fps');
             setOakHint(null);
             setLiveState('preview');
-            return;
+            return bridgeStream;
           }
         } catch (err) {
           console.warn('[UploadSection] OAK IP bridge failed, falling back to getUserMedia', err);
@@ -334,7 +301,7 @@ export default function UploadSection({
         setMediaErr(
           'This browser does not expose the MediaDevices API. Use Chrome, Safari, or Firefox latest, served over HTTPS or localhost.',
         );
-        return;
+        return null;
       }
       try {
 
@@ -367,8 +334,7 @@ export default function UploadSection({
           if (oak && oak.deviceId !== current?.deviceId) {
             // Switch. The recursive call will pin to the OAK.
             console.info('[UploadSection] auto-switching to OAK device:', oak.label);
-            await startCamera(oak.deviceId);
-            return;
+            return await startCamera(oak.deviceId);
           }
           setSelectedDeviceId(activeId);
         } else {
@@ -390,6 +356,7 @@ export default function UploadSection({
         }
 
         setLiveState('preview');
+        return stream;
       } catch (err) {
         console.error('[UploadSection] getUserMedia failed', err);
         setLiveState('error');
@@ -400,8 +367,9 @@ export default function UploadSection({
               ? 'No camera detected. Plug in an OAK-4 or any webcam and retry.'
               : err instanceof DOMException && err.name === 'OverconstrainedError'
                 ? 'Selected device is no longer available. Pick another camera.'
-                : `Could not open camera: ${(err as Error).message ?? String(err)}`,
+              : `Could not open camera: ${(err as Error).message ?? String(err)}`,
         );
+        return null;
       }
     },
     [attachStreamToPreview, refreshDevices, startOakBridge, stopBridge, stopStream],
@@ -412,9 +380,11 @@ export default function UploadSection({
     (deviceId: string) => {
       if (!deviceId || deviceId === selectedDeviceId) return;
       setSelectedDeviceId(deviceId);
-      void startCamera(deviceId);
+      if (liveState !== 'recording') {
+        void startCamera(deviceId);
+      }
     },
-    [selectedDeviceId, startCamera],
+    [liveState, selectedDeviceId, startCamera],
   );
 
   useEffect(() => {
@@ -422,12 +392,14 @@ export default function UploadSection({
       stopStream();
       return;
     }
-    if (liveState === 'init' || liveState === 'preview') {
-      if (!streamRef.current) {
-        void startCamera(selectedDeviceId ?? undefined);
-      }
+    if (liveState === 'recording' || liveState === 'error' || streamRef.current || cameraStarting) {
+      return;
     }
-  }, [mode, liveState, selectedDeviceId, startCamera, stopStream]);
+    setCameraStarting(true);
+    void startCamera(selectedDeviceId ?? undefined).finally(() => {
+      setCameraStarting(false);
+    });
+  }, [cameraStarting, liveState, mode, selectedDeviceId, startCamera, stopStream]);
 
   // React to USB hot-plug (OAK plugged in after page load).
   useEffect(() => {
@@ -441,7 +413,7 @@ export default function UploadSection({
           const oak = list.find((d) => isOakDevice(d.label));
           if (oak) {
             console.info('[UploadSection] OAK appeared on hot-plug:', oak.label);
-            void startCamera(oak.deviceId);
+            setSelectedDeviceId(oak.deviceId);
           }
         }
       });
@@ -450,20 +422,24 @@ export default function UploadSection({
     return () => {
       navigator.mediaDevices?.removeEventListener('devicechange', onChange);
     };
-  }, [refreshDevices, selectedDeviceId, startCamera]);
+  }, [refreshDevices, selectedDeviceId]);
 
-  // Cleanup on unmount: stop tracks + recorder + revoke URL.
+  // Cleanup on unmount: stop tracks and try to stop an in-flight backend capture.
   useEffect(() => {
     return () => {
-      stopStream();
-      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-        try { recorderRef.current.stop(); } catch { /* noop */ }
+      const activeJobId = activeJobIdRef.current;
+      if (activeJobId) {
+        void fetch(`http://127.0.0.1:8765/pipeline/stop/${activeJobId}`, {
+          method: 'POST',
+        }).catch(() => {
+          // Best-effort cleanup only.
+        });
       }
+      stopStream();
       if (tickRafRef.current !== null) {
         cancelAnimationFrame(tickRafRef.current);
         tickRafRef.current = null;
       }
-      if (recordedUrl) URL.revokeObjectURL(recordedUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -486,108 +462,83 @@ export default function UploadSection({
     }
   }, []);
 
-  const startRecording = useCallback(() => {
-    const stream = streamRef.current;
-    if (!stream) {
-      void startCamera();
-      return;
-    }
-    const mime = pickRecorderMime();
-    let recorder: MediaRecorder;
-    try {
-      recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
-    } catch (err) {
-      console.error('[UploadSection] MediaRecorder construction failed', err);
-      setLiveState('error');
-      setMediaErr(`Recorder unavailable: ${(err as Error).message ?? String(err)}`);
-      return;
-    }
-    chunksRef.current = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
-    };
-    recorder.onerror = (e) => {
-      console.error('[UploadSection] MediaRecorder error', e);
-    };
-    recorder.onstop = () => {
-      const type = recorder.mimeType || 'video/webm';
-      const blob = new Blob(chunksRef.current, { type });
-      chunksRef.current = [];
-      const url = URL.createObjectURL(blob);
-      if (recordedUrl) URL.revokeObjectURL(recordedUrl);
-      setRecordedBlob(blob);
-      setRecordedUrl(url);
-      setRecordedName(captureFilename());
-      setLiveState('review');
-      // We keep the live stream alive in case the user wants to re-record
-      // immediately — no need to re-prompt for camera permission.
-    };
-    recorderRef.current = recorder;
-    recorder.start(1000);
-    tickStartRef.current = Date.now();
-    setElapsed(0);
-    tickLoop();
-    setLiveState('recording');
-  }, [recordedUrl, startCamera, tickLoop]);
-
-  const stopRecording = useCallback(() => {
-    stopTickLoop();
-    const recorder = recorderRef.current;
-    if (recorder && recorder.state !== 'inactive') recorder.stop();
-  }, [stopTickLoop]);
-
-  const redoRecording = useCallback(() => {
-    if (recordedUrl) URL.revokeObjectURL(recordedUrl);
-    setRecordedBlob(null);
-    setRecordedUrl(null);
-    setRecordedName('');
-    setElapsed(0);
-    setLiveState('preview');
-  }, [recordedUrl]);
-
-  // ------------------------------------------------------------------
-  // Commit paths.
-  //   - live capture: POST /pipeline/run to the Python job server which
-  //     runs Stream 01 (capture.py) → Stream 02 (reconstruct) → Stream 03
-  //     (assembler) end-to-end and writes a fresh scene.json.
-  //   - file upload: no video→bundle adapter yet, so we still flip the UI
-  //     into the processing flow and let it fall back to the cached scene.
-  // ------------------------------------------------------------------
-  const [pipelineKickError, setPipelineKickError] = useState<string | null>(null);
-  const [pipelineStarting, setPipelineStarting] = useState(false);
-
-  const commitLive = useCallback(async () => {
-    if (!recordedBlob) return;
+  const startRecording = useCallback(async () => {
+    if (cameraStarting || pipelineStarting) return;
     setPipelineKickError(null);
-    setPipelineStarting(true);
+    const stream = streamRef.current ?? (await startCamera(selectedDeviceId ?? undefined));
+    if (!stream) {
+      return;
+    }
     try {
-      // Use the recorded clip length as the pipeline's capture duration so
-      // the user intuits "record 10s → capture 10s of real depth+RGB".
-      const durationMs = Math.max(3000, Math.min(elapsed || 10000, 30000));
-      const res = await fetch('http://127.0.0.1:8765/pipeline/run', {
+      setPipelineStarting(true);
+      const res = await fetch('http://127.0.0.1:8765/pipeline/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ duration_s: Math.round(durationMs / 1000) }),
+        body: JSON.stringify({ max_duration_s: 30 }),
       });
       if (!res.ok) {
         const body = await res.text();
         throw new Error(`HTTP ${res.status}: ${body}`);
       }
       const job = await res.json() as { job_id: string; session_id: string };
-      stopTickLoop();
-      stopStream();
-      onPipelineStarted(job.job_id, job.session_id);
+      activeJobIdRef.current = job.job_id;
+      activeSessionIdRef.current = job.session_id;
+      console.log('hello world');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('[UploadSection] pipeline kickoff failed', err);
+      console.error('[UploadSection] pipeline start failed', err);
+      setLiveState('preview');
       setPipelineKickError(
-        `Could not start pipeline: ${msg}. Check the terminal for [oak-uvc] errors.`,
+        `Could not start backend capture: ${err instanceof Error ? err.message : String(err)}.`,
       );
+      return;
     } finally {
       setPipelineStarting(false);
     }
-  }, [elapsed, onPipelineStarted, recordedBlob, stopStream, stopTickLoop]);
+    tickStartRef.current = Date.now();
+    setElapsed(0);
+    tickLoop();
+    setLiveState('recording');
+  }, [cameraStarting, pipelineStarting, selectedDeviceId, startCamera, tickLoop]);
 
+  const stopRecording = useCallback(async () => {
+    const activeJobId = activeJobIdRef.current;
+    const activeSessionId = activeSessionIdRef.current;
+    if (!activeJobId || !activeSessionId) {
+      stopTickLoop();
+      setLiveState('preview');
+      return;
+    }
+    stopTickLoop();
+    try {
+      setPipelineStarting(true);
+      const res = await fetch(`http://127.0.0.1:8765/pipeline/stop/${activeJobId}`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`HTTP ${res.status}: ${body}`);
+      }
+      activeJobIdRef.current = null;
+      activeSessionIdRef.current = null;
+      onPipelineStarted(activeJobId, activeSessionId);
+    } catch (err) {
+      console.error('[UploadSection] pipeline stop failed', err);
+      setPipelineKickError(
+        `Could not stop backend capture: ${err instanceof Error ? err.message : String(err)}.`,
+      );
+      setLiveState('recording');
+      tickStartRef.current = Date.now() - elapsed;
+      tickLoop();
+    } finally {
+      setPipelineStarting(false);
+    }
+  }, [elapsed, onPipelineStarted, stopTickLoop, tickLoop]);
+
+  // ------------------------------------------------------------------
+  // Commit paths.
+  //   - file upload: no video→bundle adapter yet, so we still flip the UI
+  //     into the processing flow and let it fall back to the cached scene.
+  // ------------------------------------------------------------------
   const commitUpload = useCallback(() => {
     if (!file) return;
     // Uploaded videos don't carry depth/IMU, so we can't feed them into
@@ -612,7 +563,6 @@ export default function UploadSection({
   };
 
   const isRecording = liveState === 'recording';
-  const isReview = liveState === 'review';
 
   return (
     <div className="w-full flex-1 flex flex-col items-center justify-center relative px-4 py-16">
@@ -627,8 +577,8 @@ export default function UploadSection({
             mode === 'live'
               ? liveState === 'recording'
                 ? 'live capture · recording'
-                : liveState === 'review'
-                  ? 'live capture · captured buffer ready'
+                : liveState === 'preview'
+                  ? 'live capture · rgb preview ready'
                   : 'live capture · awaiting capture'
               : 'file upload · awaiting input'
           }
@@ -700,35 +650,15 @@ export default function UploadSection({
               transition={{ duration: 0.2 }}
               className="relative w-full rounded-2xl border border-border bg-black/40 overflow-hidden"
             >
-              {/* Live preview / playback stage */}
+              {/* Live preview stage */}
               <div className="relative aspect-video w-full bg-black">
-                {/* Live preview video — always mounted when on live tab so srcObject sticks */}
                 <video
                   ref={livePreviewRef}
-                  className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-200 ${
-                    isReview ? 'opacity-0 pointer-events-none' : 'opacity-100'
-                  }`}
+                  className="absolute inset-0 w-full h-full object-cover transition-opacity duration-200"
                   muted
                   playsInline
                   autoPlay
                 />
-                {/* Playback of the recorded clip */}
-                {isReview && recordedUrl && (
-                  <>
-                    <video
-                      ref={playbackRef}
-                      key={recordedUrl}
-                      src={recordedUrl}
-                      className="absolute inset-0 w-full h-full object-cover"
-                      controls
-                      playsInline
-                    />
-                    <div className="absolute left-3 right-3 bottom-3 px-3 py-2 rounded border border-yellow-500/40 bg-black/65 backdrop-blur-sm text-[10px] font-mono uppercase tracking-[0.16em] text-yellow-100">
-                      review clip only. `process capture` starts a new synchronized OAK capture;
-                      this web recording is not uploaded into Stream 01.
-                    </div>
-                  </>
-                )}
 
                 {/* Scanner grid overlay */}
                 <div
@@ -750,10 +680,10 @@ export default function UploadSection({
                           ? 'bg-red-500 animate-pulse'
                           : liveState === 'preview'
                             ? 'bg-emerald-400 animate-pulse'
-                            : 'bg-yellow-400'
+                            : 'bg-slate-400'
                       }`}
                     />
-                    {isRecording ? 'rec' : liveState === 'preview' ? 'live' : liveState === 'review' ? 'buf' : 'init'}
+                    {isRecording ? 'rec' : liveState === 'preview' ? 'live' : cameraStarting ? 'arm' : 'idle'}
                   </div>
                   {bridgeActive && (
                     <div className="px-2 py-1 rounded bg-emerald-500/15 backdrop-blur-sm border border-emerald-500/40 text-[10px] font-mono uppercase tracking-[0.18em] text-emerald-300">
@@ -763,7 +693,7 @@ export default function UploadSection({
                 </div>
 
                 {/* Elapsed timer */}
-                {(isRecording || isReview) && (
+                {isRecording && (
                   <div className="absolute top-3 right-3 px-2.5 py-1 rounded bg-black/50 backdrop-blur-sm border border-border text-[11px] font-mono text-white tabular-nums">
                     {formatElapsed(elapsed)}
                   </div>
@@ -789,8 +719,10 @@ export default function UploadSection({
                 {liveState === 'init' && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm text-center p-6">
                     <div className="flex flex-col items-center gap-3 text-textSecondary">
-                      <Video className="w-8 h-8 text-primary animate-pulse" />
-                      <span className="font-mono text-xs uppercase tracking-[0.2em]">requesting camera…</span>
+                      <Video className={`w-8 h-8 text-primary ${cameraStarting ? 'animate-pulse' : ''}`} />
+                      <span className="font-mono text-xs uppercase tracking-[0.2em]">
+                        {cameraStarting ? 'opening rgb preview…' : 'camera idle'}
+                      </span>
                     </div>
                   </div>
                 )}
@@ -803,7 +735,7 @@ export default function UploadSection({
                         Camera unavailable
                       </div>
                       <p className="text-[11px] text-textSecondary leading-relaxed">
-                        {mediaErr ?? 'Unknown media error.'}
+                        {pipelineKickError ?? mediaErr ?? 'Unknown media error.'}
                       </p>
                       <button
                         onClick={() => void startCamera(selectedDeviceId ?? undefined)}
@@ -819,98 +751,66 @@ export default function UploadSection({
               {/* Control strip */}
               <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-border/70 bg-black/30">
                 <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-textSecondary/70 flex items-center gap-2 min-w-0 truncate flex-1">
-                  {liveState === 'review' ? (
-                    <>
-                      <FileVideo className="w-3 h-3 text-primary shrink-0" />
-                      <span className="truncate">{recordedName}</span>
-                      {recordedBlob && (
-                        <span className="text-primary/70 shrink-0">
-                          · {(recordedBlob.size / (1024 * 1024)).toFixed(2)} MB
-                        </span>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <Camera
-                        className={`w-3 h-3 shrink-0 ${
-                          devices.some((d) => d.deviceId === selectedDeviceId && isOakDevice(d.label))
-                            ? 'text-emerald-400'
-                            : 'text-primary'
-                        }`}
-                      />
-                      {devices.length > 1 ? (
-                        <select
-                          value={selectedDeviceId ?? ''}
-                          onChange={(e) => handleDeviceChange(e.target.value)}
-                          disabled={isRecording}
-                          title="Select camera"
-                          className="bg-black/40 border border-border rounded px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-textSecondary focus:outline-none focus:border-primary/60 disabled:opacity-50 max-w-[18rem] truncate"
-                        >
-                          {devices.map((d, i) => (
-                            <option key={d.deviceId || i} value={d.deviceId}>
-                              {d.label || `camera ${i + 1}`}
-                              {isOakDevice(d.label) ? '  ★ OAK' : ''}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span className="truncate">{devicePath}</span>
-                      )}
-                    </>
-                  )}
+                  <>
+                    <Camera
+                      className={`w-3 h-3 shrink-0 ${
+                        devices.some((d) => d.deviceId === selectedDeviceId && isOakDevice(d.label))
+                          ? 'text-emerald-400'
+                          : 'text-primary'
+                      }`}
+                    />
+                    {devices.length > 1 ? (
+                      <select
+                        value={selectedDeviceId ?? ''}
+                        onChange={(e) => handleDeviceChange(e.target.value)}
+                        disabled={isRecording || pipelineStarting}
+                        title="Select camera"
+                        className="bg-black/40 border border-border rounded px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-textSecondary focus:outline-none focus:border-primary/60 disabled:opacity-50 max-w-[18rem] truncate"
+                      >
+                        {devices.map((d, i) => (
+                          <option key={d.deviceId || i} value={d.deviceId}>
+                            {d.label || `camera ${i + 1}`}
+                            {isOakDevice(d.label) ? '  ★ OAK' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="truncate">{devicePath}</span>
+                    )}
+                  </>
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {liveState === 'preview' && (
+                  {(liveState === 'init' || liveState === 'preview') && (
                     <motion.button
                       whileHover={{ scale: 1.04 }}
                       whileTap={{ scale: 0.95 }}
-                      onClick={startRecording}
-                      className="flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/15 border border-red-500/40 text-red-300 hover:bg-red-500/25 transition-colors font-mono text-xs uppercase tracking-[0.2em]"
+                      onClick={() => void startRecording()}
+                      disabled={cameraStarting || pipelineStarting}
+                      className="flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/15 border border-red-500/40 text-red-300 hover:bg-red-500/25 transition-colors font-mono text-xs uppercase tracking-[0.2em] disabled:opacity-60"
                     >
                       <Circle className="w-3.5 h-3.5 fill-red-400 text-red-400" />
-                      record
+                      {pipelineStarting ? 'starting…' : 'record'}
                     </motion.button>
                   )}
                   {liveState === 'recording' && (
                     <motion.button
                       whileHover={{ scale: 1.04 }}
                       whileTap={{ scale: 0.95 }}
-                      onClick={stopRecording}
-                      className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/90 text-black hover:bg-white transition-colors font-mono text-xs uppercase tracking-[0.2em]"
+                      onClick={() => void stopRecording()}
+                      disabled={pipelineStarting}
+                      className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/90 text-black hover:bg-white transition-colors font-mono text-xs uppercase tracking-[0.2em] disabled:opacity-60"
                     >
                       <Square className="w-3.5 h-3.5 fill-black" />
-                      stop
+                      {pipelineStarting ? 'stopping…' : 'stop'}
                     </motion.button>
                   )}
-                  {liveState === 'review' && (
-                    <>
-                      <motion.button
-                        whileHover={{ scale: 1.04 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={redoRecording}
-                        className="flex items-center gap-2 px-3 py-2 rounded-full border border-border text-textSecondary hover:text-white hover:border-primary/40 transition-colors font-mono text-xs uppercase tracking-[0.2em]"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        re-record
-                      </motion.button>
-                      <motion.button
-                        whileHover={pipelineStarting ? undefined : {
-                          scale: 1.05,
-                          boxShadow: '0 0 20px rgba(228,107,69,0.3)',
-                        }}
-                        whileTap={pipelineStarting ? undefined : { scale: 0.95 }}
-                        onClick={commitLive}
-                        disabled={pipelineStarting}
-                        className="primary-button-solid text-xs px-4 py-2 font-mono flex items-center gap-2 disabled:opacity-60 disabled:cursor-wait"
-                      >
-                        <span className="opacity-70">./</span>
-                        {pipelineStarting ? 'starting_pipeline…' : 'start_live_capture'}
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </motion.button>
-                    </>
-                  )}
                 </div>
+              </div>
+
+              <div className="px-4 py-2 border-t border-border/60 bg-yellow-500/5 text-[11px] font-mono text-yellow-100/90 leading-relaxed">
+                Preview is RGB-only. Depth, masks, and reconstruction start only after you press
+                record, and backend capture stops when you press stop.
               </div>
 
               {/* Pipeline kickoff error */}

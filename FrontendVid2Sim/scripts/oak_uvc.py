@@ -34,6 +34,7 @@ import argparse
 import http.server
 import json
 import os
+import signal
 import shlex
 import socketserver
 import subprocess
@@ -68,6 +69,7 @@ BRIDGE_BOUNDARY = "FRAME"
 DEFAULT_CAPTURE_DURATION_S = 10.0
 MAX_CAPTURE_DURATION_S = 30.0
 MAX_OBJECTS = 5
+CAPTURE_DURATION_OVERRIDE_ENV = "VID2SIM_PIPELINE_CAPTURE_DURATION_S"
 
 
 # --------------------------------------------------------------------------
@@ -222,10 +224,43 @@ class PipelineJob:
     finished_at: float | None = None
     scene_path: str | None = None
     duration_s: float = DEFAULT_CAPTURE_DURATION_S
+    capture_proc: subprocess.Popen[str] | None = field(default=None, repr=False)
+    capture_stop_requested: bool = False
+    capture_stop_sent: bool = False
+    control_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def append_log(self, line: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
         self.log_lines.append(f"[{stamp}] {line.rstrip()}")
+
+    def attach_capture_proc(self, proc: subprocess.Popen[str]) -> bool:
+        with self.control_lock:
+            self.capture_proc = proc
+            should_stop = self.capture_stop_requested and not self.capture_stop_sent
+        return should_stop
+
+    def clear_capture_proc(self) -> None:
+        with self.control_lock:
+            self.capture_proc = None
+
+    def request_capture_stop(self) -> bool:
+        with self.control_lock:
+            if self.capture_stop_requested:
+                return False
+            self.capture_stop_requested = True
+            proc = self.capture_proc
+            should_signal = proc is not None and not self.capture_stop_sent
+            if should_signal:
+                self.capture_stop_sent = True
+        if should_signal:
+            try:
+                proc.send_signal(signal.SIGINT)
+                self.append_log("stop requested — waiting for capture to flush")
+            except Exception as e:  # noqa: BLE001
+                self.append_log(f"⚠ failed to signal capture stop: {e}")
+        else:
+            self.append_log("stop requested — capture subprocess not ready yet")
+        return True
 
     def as_dict(self) -> dict:
         return {
@@ -243,6 +278,7 @@ class PipelineJob:
             ),
             "log_lines": list(self.log_lines),
             "duration_s": self.duration_s,
+            "capture_stop_requested": self.capture_stop_requested,
         }
 
 
@@ -307,6 +343,44 @@ def _stream_subprocess(job: PipelineJob, argv: list[str], stage: str, *, cwd: Pa
     return rc
 
 
+def _stream_capture_subprocess(job: PipelineJob, argv: list[str], *, cwd: Path) -> int:
+    """Run capture.py, allow /pipeline/stop to interrupt it via SIGINT, and stream logs."""
+    job.stage = "capture"
+    job.append_log("→ (capture) " + " ".join(shlex.quote(a) for a in argv))
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(cwd),
+            env=env,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError as e:
+        job.append_log(f"✗ (capture) executable not found: {e}")
+        return 127
+
+    should_stop_immediately = job.attach_capture_proc(proc)
+    if should_stop_immediately:
+        try:
+            proc.send_signal(signal.SIGINT)
+            job.append_log("stop was already requested; sent SIGINT to capture")
+        except Exception as e:  # noqa: BLE001
+            job.append_log(f"⚠ failed to send initial SIGINT to capture: {e}")
+
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        job.append_log(line.rstrip())
+        print(f"[pipeline:capture] {line.rstrip()}", flush=True)
+    rc = proc.wait()
+    job.clear_capture_proc()
+    job.append_log(f"← (capture) exit={rc}")
+    return rc
+
+
 def _resolve_python() -> str:
     """Use the same interpreter that's running this script for subprocesses."""
     return sys.executable
@@ -341,6 +415,7 @@ def _run_pipeline(job: PipelineJob, preview: _Preview) -> None:
     # Pause preview so the capture subprocess can own the OAK.
     preview_was_active = preview.active
     preview.stop()
+    preview_resumed = False
 
     python = _resolve_python()
     runpod_cfg = os.environ.get("VID2SIM_RUNPOD_CONFIG", str(REPO_ROOT / "config" / "runpod.yaml"))
@@ -351,7 +426,18 @@ def _run_pipeline(job: PipelineJob, preview: _Preview) -> None:
         job.state = "capturing"
         capture_dir.mkdir(parents=True, exist_ok=True)
         duration = max(3.0, min(job.duration_s, MAX_CAPTURE_DURATION_S))
-        cap_rc = _stream_subprocess(
+        override_raw = os.environ.get(CAPTURE_DURATION_OVERRIDE_ENV)
+        if override_raw:
+            try:
+                duration = max(3.0, min(float(override_raw), MAX_CAPTURE_DURATION_S))
+                job.append_log(
+                    f"{CAPTURE_DURATION_OVERRIDE_ENV}={duration:.1f} — overriding requested duration"
+                )
+            except ValueError:
+                job.append_log(
+                    f"ignoring invalid {CAPTURE_DURATION_OVERRIDE_ENV}={override_raw!r}"
+                )
+        cap_rc = _stream_capture_subprocess(
             job,
             [
                 python, "-m", "src.perception.capture",
@@ -361,7 +447,6 @@ def _run_pipeline(job: PipelineJob, preview: _Preview) -> None:
                 # rather than only the default household whitelist.
                 "--prompts", "all",
             ],
-            stage="capture",
             cwd=REPO_ROOT,
         )
         if cap_rc == 3:
@@ -374,6 +459,13 @@ def _run_pipeline(job: PipelineJob, preview: _Preview) -> None:
             job.state = "failed"
             job.error = f"capture exited {cap_rc}"
             return
+
+        if preview_was_active:
+            try:
+                preview.start()
+                preview_resumed = True
+            except Exception as e:  # noqa: BLE001
+                job.append_log(f"⚠ preview restart failed after capture: {e}")
 
         # ---- Stage 02: reconstruction --------------------------------
         job.state = "reconstructing"
@@ -433,8 +525,8 @@ def _run_pipeline(job: PipelineJob, preview: _Preview) -> None:
     finally:
         job.finished_at = time.time()
         JOBS.finish(job)
-        # Resume preview so the next /pipeline/run has a live feed again.
-        if preview_was_active:
+        # Resume preview so the next recording has a live RGB feed again.
+        if preview_was_active and not preview_resumed:
             try:
                 preview.start()
             except Exception as e:  # noqa: BLE001
@@ -537,9 +629,10 @@ def _make_handler(preview: _Preview):
             self.end_headers()
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path == "/pipeline/run":
+            if self.path in ("/pipeline/run", "/pipeline/start"):
                 body = self._read_json_body()
-                duration_s = float(body.get("duration_s", DEFAULT_CAPTURE_DURATION_S))
+                duration_key = "max_duration_s" if self.path == "/pipeline/start" else "duration_s"
+                duration_s = float(body.get(duration_key, DEFAULT_CAPTURE_DURATION_S))
                 duration_s = max(3.0, min(duration_s, MAX_CAPTURE_DURATION_S))
 
                 now = datetime.now()
@@ -565,6 +658,25 @@ def _make_handler(preview: _Preview):
                     daemon=True,
                 ).start()
                 self._send_json(202, job.as_dict())
+                return
+
+            if self.path.startswith("/pipeline/stop/"):
+                job_id = self.path.removeprefix("/pipeline/stop/").split("?", 1)[0]
+                job = JOBS.get(job_id)
+                if job is None:
+                    self._send_json(404, {"error": f"unknown job_id {job_id}"})
+                    return
+                if job.state != "capturing":
+                    self._send_json(409, {
+                        "error": f"job {job_id} is not capturing",
+                        "job": job.as_dict(),
+                    })
+                    return
+                accepted = job.request_capture_stop()
+                self._send_json(202, {
+                    "accepted": accepted,
+                    "job": job.as_dict(),
+                })
                 return
 
             self.send_response(404)

@@ -12,6 +12,7 @@ import {
   RotateCcw,
   ArrowRight,
   AlertTriangle,
+  Camera,
 } from 'lucide-react';
 import { StatusRibbon, CornerMark } from './SectionChrome';
 
@@ -58,6 +59,17 @@ function captureFilename(): string {
   );
 }
 
+/**
+ * True if a device's label looks like a Luxonis OAK camera. OAK devices
+ * exposed in UVC mode typically advertise a label containing "OAK" (e.g.
+ * "OAK-4", "OAK-D Pro", "OAK-1 (03e7:2485)").
+ */
+function isOakDevice(label: string): boolean {
+  const l = label.toLowerCase();
+  return l.includes('oak') || l.includes('luxonis') || l.includes('depthai');
+}
+
+
 export default function UploadSection({ onUploadComplete }: UploadSectionProps) {
   const [mode, setMode] = useState<SourceMode>('live');
 
@@ -74,6 +86,9 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
   const [recordedName, setRecordedName] = useState<string>('');
   const [elapsed, setElapsed] = useState(0);
   const [devicePath, setDevicePath] = useState<string>('webcam·default');
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const [oakHint, setOakHint] = useState<string | null>(null);
 
   const livePreviewRef = useRef<HTMLVideoElement>(null);
   const playbackRef = useRef<HTMLVideoElement>(null);
@@ -82,6 +97,7 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
   const chunksRef = useRef<Blob[]>([]);
   const tickStartRef = useRef<number>(0);
   const tickRafRef = useRef<number | null>(null);
+  const devicesEnumeratedRef = useRef<boolean>(false);
 
   // ------------------------------------------------------------------
   // Camera lifecycle: start when mode=='live' and we're not reviewing.
@@ -93,52 +109,141 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
     }
   }, []);
 
-  const startCamera = useCallback(async () => {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setLiveState('error');
-      setMediaErr(
-        'This browser does not expose the MediaDevices API. Use Chrome, Safari, or Firefox latest, served over HTTPS or localhost.',
-      );
-      return;
-    }
+  const attachStreamToPreview = useCallback(async (stream: MediaStream) => {
+    const video = livePreviewRef.current;
+    if (!video) return;
+    video.srcObject = stream;
+    video.muted = true;
+    video.playsInline = true;
+    await video.play().catch(() => {
+      // Autoplay can be blocked; next user gesture resumes it.
+    });
+  }, []);
+
+  /**
+   * Enumerate video inputs. Labels are only populated after at least one
+   * getUserMedia permission has been granted — so we call this AFTER the
+   * first stream has opened.
+   */
+  const refreshDevices = useCallback(async (): Promise<MediaDeviceInfo[]> => {
+    if (!navigator.mediaDevices?.enumerateDevices) return [];
     try {
-      setLiveState('init');
-      setMediaErr(null);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 },
-        },
-        audio: false,
-      });
-      streamRef.current = stream;
-      const video = livePreviewRef.current;
-      if (video) {
-        video.srcObject = stream;
-        video.muted = true;
-        video.playsInline = true;
-        await video.play().catch(() => {
-          // Autoplay can be blocked; the user's gesture to start recording will resume it.
-        });
+      const all = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = all.filter((d) => d.kind === 'videoinput');
+      setDevices(videoInputs);
+      devicesEnumeratedRef.current = true;
+      const oak = videoInputs.find((d) => isOakDevice(d.label));
+      if (oak) {
+        setOakHint(null);
+      } else if (videoInputs.length > 0) {
+        setOakHint(
+          'OAK-4 not detected as a UVC webcam. Flash the OAK UVC firmware (see Luxonis docs) or pick another device.',
+        );
       }
-      const settings = stream.getVideoTracks()[0]?.getSettings();
-      if (settings?.width && settings?.height) {
-        setDevicePath(`webcam · ${settings.width}×${settings.height}@${Math.round(settings.frameRate ?? 30)}fps`);
-      }
-      setLiveState('preview');
+      return videoInputs;
     } catch (err) {
-      console.error('[UploadSection] getUserMedia failed', err);
-      setLiveState('error');
-      setMediaErr(
-        err instanceof DOMException && err.name === 'NotAllowedError'
-          ? 'Camera access denied. Grant permission in your browser site settings and reload.'
-          : err instanceof DOMException && err.name === 'NotFoundError'
-            ? 'No camera detected. Plug in an OAK-4 or any webcam and retry.'
-            : `Could not open camera: ${(err as Error).message ?? String(err)}`,
-      );
+      console.warn('[UploadSection] enumerateDevices failed', err);
+      return [];
     }
   }, []);
+
+  /**
+   * Open a video stream. If `preferredDeviceId` is given, pin to it with
+   * `deviceId: { exact }`; otherwise open the default, enumerate devices,
+   * and auto-switch to the OAK if present.
+   */
+  const startCamera = useCallback(
+    async (preferredDeviceId?: string | null) => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setLiveState('error');
+        setMediaErr(
+          'This browser does not expose the MediaDevices API. Use Chrome, Safari, or Firefox latest, served over HTTPS or localhost.',
+        );
+        return;
+      }
+      try {
+        setLiveState('init');
+        setMediaErr(null);
+        stopStream();
+
+        const videoConstraint: MediaTrackConstraints = preferredDeviceId
+          ? { deviceId: { exact: preferredDeviceId } }
+          : {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              frameRate: { ideal: 30 },
+            };
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: videoConstraint,
+          audio: false,
+        });
+        streamRef.current = stream;
+        await attachStreamToPreview(stream);
+
+        const track = stream.getVideoTracks()[0];
+        const settings = track?.getSettings();
+        const activeId = settings?.deviceId ?? preferredDeviceId ?? null;
+
+        // Populate the device list (requires an open stream for labels).
+        const list = await refreshDevices();
+
+        // Auto-switch to OAK on the first open if we didn't explicitly pin a
+        // device and an OAK is present but wasn't what the browser chose.
+        if (!preferredDeviceId) {
+          const current = list.find((d) => d.deviceId === activeId);
+          const oak = list.find((d) => isOakDevice(d.label));
+          if (oak && oak.deviceId !== current?.deviceId) {
+            // Switch. The recursive call will pin to the OAK.
+            console.info('[UploadSection] auto-switching to OAK device:', oak.label);
+            await startCamera(oak.deviceId);
+            return;
+          }
+          setSelectedDeviceId(activeId);
+        } else {
+          setSelectedDeviceId(activeId ?? preferredDeviceId);
+        }
+
+        // Pretty device-path string for the status row.
+        const activeLabel =
+          list.find((d) => d.deviceId === activeId)?.label ?? track?.label ?? 'camera';
+        const shortLabel = activeLabel.replace(/\s*\([0-9a-f]+:[0-9a-f]+\)\s*$/i, '').trim();
+        if (settings?.width && settings?.height) {
+          setDevicePath(
+            `${shortLabel || 'webcam'} · ${settings.width}×${settings.height}@${Math.round(
+              settings.frameRate ?? 30,
+            )}fps`,
+          );
+        } else {
+          setDevicePath(shortLabel || 'webcam');
+        }
+
+        setLiveState('preview');
+      } catch (err) {
+        console.error('[UploadSection] getUserMedia failed', err);
+        setLiveState('error');
+        setMediaErr(
+          err instanceof DOMException && err.name === 'NotAllowedError'
+            ? 'Camera access denied. Grant permission in your browser site settings and reload.'
+            : err instanceof DOMException && err.name === 'NotFoundError'
+              ? 'No camera detected. Plug in an OAK-4 or any webcam and retry.'
+              : err instanceof DOMException && err.name === 'OverconstrainedError'
+                ? 'Selected device is no longer available. Pick another camera.'
+                : `Could not open camera: ${(err as Error).message ?? String(err)}`,
+        );
+      }
+    },
+    [attachStreamToPreview, refreshDevices, stopStream],
+  );
+
+  /** User picked a device from the dropdown. */
+  const handleDeviceChange = useCallback(
+    (deviceId: string) => {
+      if (!deviceId || deviceId === selectedDeviceId) return;
+      setSelectedDeviceId(deviceId);
+      void startCamera(deviceId);
+    },
+    [selectedDeviceId, startCamera],
+  );
 
   useEffect(() => {
     if (mode !== 'live') {
@@ -147,10 +252,33 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
     }
     if (liveState === 'init' || liveState === 'preview') {
       if (!streamRef.current) {
-        void startCamera();
+        void startCamera(selectedDeviceId ?? undefined);
       }
     }
-  }, [mode, liveState, startCamera, stopStream]);
+  }, [mode, liveState, selectedDeviceId, startCamera, stopStream]);
+
+  // React to USB hot-plug (OAK plugged in after page load).
+  useEffect(() => {
+    if (!navigator.mediaDevices?.addEventListener) return;
+    const onChange = () => {
+      void refreshDevices().then((list) => {
+        if (!devicesEnumeratedRef.current) return;
+        // If the user hasn't picked anything yet and an OAK just appeared,
+        // switch to it automatically.
+        if (!selectedDeviceId) {
+          const oak = list.find((d) => isOakDevice(d.label));
+          if (oak) {
+            console.info('[UploadSection] OAK appeared on hot-plug:', oak.label);
+            void startCamera(oak.deviceId);
+          }
+        }
+      });
+    };
+    navigator.mediaDevices.addEventListener('devicechange', onChange);
+    return () => {
+      navigator.mediaDevices?.removeEventListener('devicechange', onChange);
+    };
+  }, [refreshDevices, selectedDeviceId, startCamera]);
 
   // Cleanup on unmount: stop tracks + recorder + revoke URL.
   useEffect(() => {
@@ -461,7 +589,7 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
                         {mediaErr ?? 'Unknown media error.'}
                       </p>
                       <button
-                        onClick={() => void startCamera()}
+                        onClick={() => void startCamera(selectedDeviceId ?? undefined)}
                         className="mt-1 px-4 py-1.5 rounded border border-primary/40 bg-primary/10 text-primary text-xs font-mono hover:bg-primary/20 transition-colors"
                       >
                         retry
@@ -473,21 +601,44 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
 
               {/* Control strip */}
               <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-border/70 bg-black/30">
-                <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-textSecondary/70 flex items-center gap-2 min-w-0 truncate">
+                <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-textSecondary/70 flex items-center gap-2 min-w-0 truncate flex-1">
                   {liveState === 'review' ? (
                     <>
                       <FileVideo className="w-3 h-3 text-primary shrink-0" />
                       <span className="truncate">{recordedName}</span>
                       {recordedBlob && (
-                        <span className="text-primary/70">
+                        <span className="text-primary/70 shrink-0">
                           · {(recordedBlob.size / (1024 * 1024)).toFixed(2)} MB
                         </span>
                       )}
                     </>
                   ) : (
                     <>
-                      <ScanLine className="w-3 h-3 text-primary shrink-0" />
-                      <span>{devicePath}</span>
+                      <Camera
+                        className={`w-3 h-3 shrink-0 ${
+                          devices.some((d) => d.deviceId === selectedDeviceId && isOakDevice(d.label))
+                            ? 'text-emerald-400'
+                            : 'text-primary'
+                        }`}
+                      />
+                      {devices.length > 1 ? (
+                        <select
+                          value={selectedDeviceId ?? ''}
+                          onChange={(e) => handleDeviceChange(e.target.value)}
+                          disabled={isRecording}
+                          title="Select camera"
+                          className="bg-black/40 border border-border rounded px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-textSecondary focus:outline-none focus:border-primary/60 disabled:opacity-50 max-w-[18rem] truncate"
+                        >
+                          {devices.map((d, i) => (
+                            <option key={d.deviceId || i} value={d.deviceId}>
+                              {d.label || `camera ${i + 1}`}
+                              {isOakDevice(d.label) ? '  ★ OAK' : ''}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="truncate">{devicePath}</span>
+                      )}
                     </>
                   )}
                 </div>
@@ -542,6 +693,14 @@ export default function UploadSection({ onUploadComplete }: UploadSectionProps) 
                   )}
                 </div>
               </div>
+
+              {/* OAK-not-found hint */}
+              {oakHint && liveState !== 'error' && (
+                <div className="flex items-start gap-2 px-4 py-2 border-t border-border/60 bg-yellow-500/5 text-[10px] font-mono uppercase tracking-[0.18em] text-yellow-200/80">
+                  <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5 text-yellow-400" />
+                  <span className="leading-relaxed">{oakHint}</span>
+                </div>
+              )}
             </motion.div>
           ) : (
             <motion.div
